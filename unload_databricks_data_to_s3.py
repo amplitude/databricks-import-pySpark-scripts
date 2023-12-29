@@ -1,7 +1,5 @@
 import argparse
 
-import spark
-
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='unload data from databricks using SparkPython')
     parser.add_argument("table_versions_map", help="tables and version ranges where data imported from. "
