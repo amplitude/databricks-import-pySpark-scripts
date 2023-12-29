@@ -1,6 +1,10 @@
 import argparse
 import sys
 
+def main():
+    print("Hello world!")
+
+
 if __name__ == '__main__':
     # parser = argparse.ArgumentParser(description='unload data from databricks using SparkPython')
     # parser.add_argument("table_versions_map", help="tables and version ranges where data imported from. "
@@ -21,12 +25,11 @@ if __name__ == '__main__':
     # print(parser.aws_secret_key_secret_key)
     # print(parser.aws_session_token_secret_key)
     # print(parser.s3_path)
-    print("Hello world!")
-    print(sys.argv[1])
-    print(sys.argv[2])
-    print(sys.argv[3])
-    print(sys.argv[4])
-    print(sys.argv[5])
-    print(sys.argv[6])
-    exit(0)
 
+    # print(sys.argv[1])
+    # print(sys.argv[2])
+    # print(sys.argv[3])
+    # print(sys.argv[4])
+    # print(sys.argv[5])
+    # print(sys.argv[6])
+    main();
