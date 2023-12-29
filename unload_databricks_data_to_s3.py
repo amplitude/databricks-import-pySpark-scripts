@@ -14,13 +14,13 @@ def main():
     parser.add_argument("s3_path", help="s3 path where data will be written into")
 
     args = parser.parse_args()
-    print(parser.table_versions_map)
-    print(parser.data_type)
-    print(parser.sql)
-    print(parser.aws_access_key_secret_key)
-    print(parser.aws_secret_key_secret_key)
-    print(parser.aws_session_token_secret_key)
-    print(parser.s3_path)
+    print(args.table_versions_map)
+    print(args.data_type)
+    print(args.sql)
+    print(args.aws_access_key_secret_key)
+    print(args.aws_secret_key_secret_key)
+    print(args.aws_session_token_secret_key)
+    print(args.s3_path)
 
 
 if __name__ == '__main__':
