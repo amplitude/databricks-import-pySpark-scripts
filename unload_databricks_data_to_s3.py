@@ -20,4 +20,5 @@ if __name__ == '__main__':
     print(parser.aws_secret_key_secret_key)
     print(parser.aws_session_token_secret_key)
     print(parser.s3_path)
+    exit(0)
 
