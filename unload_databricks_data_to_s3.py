@@ -2,6 +2,12 @@ import argparse
 import sys
 
 def main():
+    print(sys.argv[1])
+    print(sys.argv[2])
+    print(sys.argv[3])
+    print(sys.argv[4])
+    print(sys.argv[5])
+    print(sys.argv[6])
     print("Hello world!")
 
 
@@ -26,10 +32,4 @@ if __name__ == '__main__':
     # print(parser.aws_session_token_secret_key)
     # print(parser.s3_path)
 
-    # print(sys.argv[1])
-    # print(sys.argv[2])
-    # print(sys.argv[3])
-    # print(sys.argv[4])
-    # print(sys.argv[5])
-    # print(sys.argv[6])
     main();
