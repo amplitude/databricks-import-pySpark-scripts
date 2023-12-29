@@ -10,7 +10,7 @@ def main():
     parser.add_argument("--sql", help="transformation sql")
     parser.add_argument("--aws_access_key_secret_key", help="databricks secret key name of aws_access_key")
     parser.add_argument("--aws_secret_key_secret_key", help="databricks secret key name of aws_secret_key")
-    parser.add_argument("--asaws_session_token_secret_key", help="databricks secret key name of aws_session_token")
+    parser.add_argument("--aws_session_token_secret_key", help="databricks secret key name of aws_session_token")
     parser.add_argument("--s3_path", help="s3 path where data will be written into")
 
     args = parser.parse_args()
