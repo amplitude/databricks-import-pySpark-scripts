@@ -26,8 +26,8 @@ def parse_table_versions_map_arg(table_versions_map: str) -> dict[str, list[int]
 
 def build_temp_view_name(table: str) -> str:
     """
-    Build temp view name for the table. Wrap table name with '`' to escape '.'. Append `epoch` to table name
-    to make view name more unique.
+    Build temp view name for the table. Wrap table name with '`' to escape '.'. Append `epoch` so view name is very
+    unlikely collapse with another table.
     :param table: table name
     :return: temp view name for the table
     """
@@ -91,6 +91,6 @@ if __name__ == '__main__':
         print(df.show())
         view_name: str = build_temp_view_name(table)
         df.createOrReplaceTempView(view_name)
-        sql.replace(table, view_name)
+        sql = sql.replace(table, view_name)
         df2: DataFrame = spark.sql(sql)
         print(df2.show())
