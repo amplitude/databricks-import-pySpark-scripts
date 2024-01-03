@@ -1,7 +1,6 @@
 import argparse
 import collections
 
-from pyspark.python.pyspark.shell import spark
 from pyspark.sql import DataFrame
 
 
