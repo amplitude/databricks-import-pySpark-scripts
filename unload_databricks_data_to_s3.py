@@ -97,4 +97,4 @@ if __name__ == '__main__':
     # export_data.write.mode("overwrite").json(args.s3_path)
 
     # stop spark session
-    SparkSession.stop(spark)
+    spark.stop()
