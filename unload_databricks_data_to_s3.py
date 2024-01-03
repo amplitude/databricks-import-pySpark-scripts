@@ -1,6 +1,6 @@
 import argparse
 import collections
-
+from pyspark.sql import SparkSession
 from pyspark.sql import DataFrame
 
 
@@ -55,4 +55,5 @@ def import_data():
 
 
 if __name__ == '__main__':
+    spark = SparkSession.builder.getOrCreate()
     import_data()
