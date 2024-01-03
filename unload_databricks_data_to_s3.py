@@ -44,7 +44,7 @@ def import_data():
     table_to_import_version_range_map = parse_table_versions_map_arg(args.table_versions_map)
     for table, import_version_range in table_to_import_version_range_map:
         df = pull_data(table, import_version_range[0], import_version_range[1])
-        df.show()
+        print(df.show())
     # print(args.table_versions_map)
     # print(args.data_type)
     # print(args.sql)
