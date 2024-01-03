@@ -15,17 +15,33 @@ def parse_table_versions_map_arg(table_versions_map: str) -> dict[str, list[int]
     return d
 
 
+def build_sql_to_query_table_of_version(table_full_name: str, ending_version: int) -> str:
+    return "select * from {table} version as of {version}".format(table=table_full_name, version=ending_version)
+
+
+def build_sql_to_query_table_between_versions(table_full_name: str, starting_version: int, ending_version: int) -> str:
+    return "select * from table_changes(\"{table}\", {starting_version}, {ending_version})".format(
+        table=table_full_name, starting_version=starting_version, ending_version=ending_version)
+
+
 def pull_data(table_full_name: str, starting_version: int, ending_version: int) -> DataFrame:
     if starting_version == 0:
-        return spark.sql("select * from {table} VERSION AS OF {version}"
-                         .format(table=table_full_name, version=ending_version))
+        return spark.sql(build_sql_to_query_table_of_version(table_full_name, ending_version))
     else:
         # TODO: filter data
-        return spark.sql("select * from table_changes(\"{table}\", {starting_version}, {ending_version})"
-                         .format(table=table_full_name,starting_version=starting_version,ending_version=ending_version))
+        return spark.sql(build_sql_to_query_table_between_versions(table_full_name, starting_version, ending_version))
+
+    # print(args.table_versions_map)
+    # print(args.data_type)
+    # print(args.sql)
+    # print(args.secret_key_name_for_aws_access_key)
+    # print(args.secret_key_name_for_aws_secret_key)
+    # print(args.secret_key_name_for_aws_session_token)
+    # print(args.s3_path)
 
 
-def import_data():
+if __name__ == '__main__':
+    spark = SparkSession.builder.getOrCreate()
     parser = argparse.ArgumentParser(description='unload data from databricks using SparkPython')
     parser.add_argument("table_versions_map", help="""tables and version ranges where data imported from. 
     Format syntax is '[{tableVersion},...,{tableVersion*N}]'. '{tableVersion}' will be 
@@ -44,16 +60,4 @@ def import_data():
     table_to_import_version_range_map = parse_table_versions_map_arg(args.table_versions_map)
     for table, import_version_range in table_to_import_version_range_map.items():
         df: DataFrame = pull_data(table, import_version_range[0], import_version_range[1])
-        print(df.show())
-    # print(args.table_versions_map)
-    # print(args.data_type)
-    # print(args.sql)
-    # print(args.secret_key_name_for_aws_access_key)
-    # print(args.secret_key_name_for_aws_secret_key)
-    # print(args.secret_key_name_for_aws_session_token)
-    # print(args.s3_path)
-
-
-if __name__ == '__main__':
-    spark = SparkSession.builder.getOrCreate()
-    import_data()
+        df.createOrReplaceTempView(table)
