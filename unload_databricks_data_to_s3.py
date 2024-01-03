@@ -57,7 +57,9 @@ if __name__ == '__main__':
     parser.add_argument("s3_path", help="s3 path where data will be written into")
 
     args = parser.parse_args()
-    table_to_import_version_range_map = parse_table_versions_map_arg(args.table_versions_map)
+    table_to_import_version_range_map: dict[str, list[int]] = parse_table_versions_map_arg(args.table_versions_map)
     for table, import_version_range in table_to_import_version_range_map.items():
         df: DataFrame = pull_data(table, import_version_range[0], import_version_range[1])
+        print(df.show())
         df.createOrReplaceTempView(table)
+        df2 = spark.sql("select * from {table}".format(table=table))
