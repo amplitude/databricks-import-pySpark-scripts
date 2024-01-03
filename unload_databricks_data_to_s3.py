@@ -77,13 +77,9 @@ if __name__ == '__main__':
     aws_session_token = dbutils.secrets.get(scope=args.secret_scope, key=args.secret_key_name_for_aws_session_token)
     spark.conf.set("fs.s3a.aws.credentials.provider", "org.apache.hadoop.fs.s3a.TemporaryAWSCredentialsProvider")
     spark.conf.set("fs.s3a.access.key", aws_access_key)
-    print(aws_access_key)
     spark.conf.set("fs.s3a.secret.key", aws_secret_key)
-    print(aws_access_key)
     spark.conf.set("fs.s3a.session.token", aws_session_token)
-    print(aws_session_token)
     spark.conf.set("fs.s3a.endpoint.region", args.s3_region)
-    print(args.s3)
 
     sql: str = args.sql
 
