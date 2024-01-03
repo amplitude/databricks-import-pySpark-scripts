@@ -50,14 +50,6 @@ def pull_data(table_full_name: str, starting_version: int, ending_version: int) 
         # TODO: filter data
         return spark.sql(build_sql_to_query_table_between_versions(table_full_name, starting_version, ending_version))
 
-    # print(args.table_versions_map)
-    # print(args.data_type)
-    # print(args.sql)
-    # print(args.secret_key_name_for_aws_access_key)
-    # print(args.secret_key_name_for_aws_secret_key)
-    # print(args.secret_key_name_for_aws_session_token)
-    # print(args.s3_path)
-
 
 if __name__ == '__main__':
     spark = SparkSession.builder.getOrCreate()
