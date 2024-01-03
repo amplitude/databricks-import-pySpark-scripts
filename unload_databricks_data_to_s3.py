@@ -93,8 +93,7 @@ if __name__ == '__main__':
         sql = sql.replace(table, view_name)
 
     export_data: DataFrame = spark.sql(sql)
-    print(export_data)
-    # export_data.write.mode("overwrite").json(args.s3_path)
+    export_data.write.mode("overwrite").json(args.s3_path)
 
     # stop spark session
     spark.stop()
