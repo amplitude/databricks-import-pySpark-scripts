@@ -1,7 +1,8 @@
 import argparse
 import collections
-import sys
-import spark
+
+from pyspark.shell import spark
+from pyspark.sql import DataFrame
 
 
 def parse_table_versions_map_arg(table_versions_map: str) -> dict[str, list[int]]:
@@ -15,7 +16,7 @@ def parse_table_versions_map_arg(table_versions_map: str) -> dict[str, list[int]
     return d
 
 
-def pull_data(table_full_name: str, starting_version: int, ending_version: int):
+def pull_data(table_full_name: str, starting_version: int, ending_version: int) -> DataFrame:
     if starting_version == 0:
         return spark.sql("select * from {table} VERSION AS OF {version}"
                          .format(table=table_full_name, version=ending_version))
@@ -43,7 +44,7 @@ def import_data():
     args = parser.parse_args()
     table_to_import_version_range_map = parse_table_versions_map_arg(args.table_versions_map)
     for table, import_version_range in table_to_import_version_range_map:
-        df = pull_data(table, import_version_range[0], import_version_range[1])
+        df: DataFrame = pull_data(table, import_version_range[0], import_version_range[1])
         print(df.show())
     # print(args.table_versions_map)
     # print(args.data_type)
@@ -55,4 +56,4 @@ def import_data():
 
 
 if __name__ == '__main__':
-    import_data();
+    import_data()
