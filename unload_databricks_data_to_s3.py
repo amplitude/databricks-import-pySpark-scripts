@@ -21,7 +21,7 @@ def pull_data(table_full_name: str, starting_version: int, ending_version: int) 
                          .format(table=table_full_name, version=ending_version))
     else:
         # TODO: filter data
-        return spark.sql("select * from table_changes({table}, {starting_version}, {ending_version})"
+        return spark.sql("select * from table_changes(\"{table}\", {starting_version}, {ending_version})"
                          .format(table=table_full_name,starting_version=starting_version,ending_version=ending_version))
 
 
