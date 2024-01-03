@@ -52,6 +52,7 @@ def query_data(table_full_name: str, starting_version: int, ending_version: int)
 
 
 if __name__ == '__main__':
+    print("hi")
     # parser = argparse.ArgumentParser(description='unload data from databricks using SparkPython')
     # parser.add_argument("table_versions_map", help="""tables and version ranges where data imported from.
     # Format syntax is '[{tableVersion},...,{tableVersion*N}]'. '{tableVersion}' will be
