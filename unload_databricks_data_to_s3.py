@@ -68,9 +68,9 @@ if __name__ == '__main__':
     # parser.add_argument("s3_region", help="s3 region")
     # parser.add_argument("s3_path", help="s3 path where data will be written into")
 
-    args = parser.parse_args()
+    # args = parser.parse_args()
 
-    spark = SparkSession.builder.getOrCreate()
+    # spark = SparkSession.builder.getOrCreate()
     # setup s3 credentials for data export
     # aws_access_key = dbutils.secrets.get(scope=args.secret_scope, key=args.secret_key_name_for_aws_access_key)
     # aws_secret_key = dbutils.secrets.get(scope=args.secret_scope, key=args.secret_key_name_for_aws_secret_key)
@@ -81,7 +81,7 @@ if __name__ == '__main__':
     # spark.conf.set("fs.s3a.session.token", aws_session_token)
     # spark.conf.set("fs.s3a.endpoint.region", args.s3_region)
 
-    sql: str = args.sql
+    # sql: str = args.sql
 
     # # Build temp views
     # table_to_import_version_range_map: dict[str, list[int]] = parse_table_versions_map_arg(args.table_versions_map)
@@ -96,4 +96,4 @@ if __name__ == '__main__':
     # export_data.write.mode("overwrite").json(args.s3_path)
 
     # stop spark session
-    spark.stop()
+    # spark.stop()
