@@ -63,3 +63,4 @@ if __name__ == '__main__':
         print(df.show())
         df.createOrReplaceTempView(table)
         df2 = spark.sql("select * from {table}".format(table=table))
+        print(df2.show())
