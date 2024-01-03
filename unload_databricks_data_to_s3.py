@@ -72,9 +72,9 @@ if __name__ == '__main__':
 
     spark = SparkSession.builder.getOrCreate()
     # setup s3 credentials for data export
-    aws_access_key = dbutils.secrets.get(scope=parser.secret_scope, key=parser.secret_key_name_for_aws_access_key)
-    aws_secret_key = dbutils.secrets.get(scope=parser.secret_scope, key=parser.secret_key_name_for_aws_secret_key)
-    aws_session_token = dbutils.secrets.get(scope=parser.secret_scope, key=parser.secret_key_name_for_aws_session_token)
+    aws_access_key = dbutils.secrets.get(scope=args.secret_scope, key=args.secret_key_name_for_aws_access_key)
+    aws_secret_key = dbutils.secrets.get(scope=args.secret_scope, key=args.secret_key_name_for_aws_secret_key)
+    aws_session_token = dbutils.secrets.get(scope=args.secret_scope, key=args.secret_key_name_for_aws_session_token)
     spark.conf.set("fs.s3a.aws.credentials.provider", "org.apache.hadoop.fs.s3a.TemporaryAWSCredentialsProvider")
     spark.conf.set("fs.s3a.access.key", aws_access_key)
     spark.conf.set("fs.s3a.secret.key", aws_secret_key)
