@@ -1,9 +1,10 @@
 import unittest
-from unload_databricks_data_to_s3 import parse_table_versions_map_arg, build_sql_to_query_table_of_version, \
-    build_sql_to_query_table_between_versions, get_partition_count
+
+from utils import parse_table_versions_map_arg, build_sql_to_query_table_of_version, \
+    build_sql_to_query_table_between_versions, get_partition_count, parse_tables_arg
 
 
-class TestStringMethods(unittest.TestCase):
+class TestUtilsMethods(unittest.TestCase):
 
     def test_parse_table_version(self):
         expected = {'catalog.schema.table': [100, 200]}
@@ -26,3 +27,6 @@ class TestStringMethods(unittest.TestCase):
         self.assertEqual(1, get_partition_count(1, 2))
         self.assertEqual(1, get_partition_count(2, 2))
         self.assertEqual(2, get_partition_count(3, 2))
+
+    def test_parse_tables_arg(self):
+        self.assertEqual(["table1", "table2", "table3"], parse_tables_arg("table1,table2,table3"))
