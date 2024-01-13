@@ -77,53 +77,32 @@ def export_meta_data(event_count: int, partition_count: int):
     spark.createDataFrame(meta_data).write.mode("overwrite").json(args.s3_path + "/meta")
 
 
-def validate_args(args):
-    if args.table_versions_map is None:
-        raise Exception("Argument --table_versions_map is None")
-    if args.data_type is None:
-        raise Exception("Argument --data_type is None")
-    if args.sql is None:
-        raise Exception("Argument --sql is None")
-    if args.secret_scope is None:
-        raise Exception("Argument --secret_scope is None")
-    if args.secret_key_name_for_aws_access_key is None:
-        raise Exception("Argument --secret_key_name_for_aws_access_key is None")
-    if args.secret_key_name_for_aws_secret_key is None:
-        raise Exception("Argument --secret_key_name_for_aws_secret_key is None")
-    if args.secret_key_name_for_aws_session_token is None:
-        raise Exception("Argument --secret_key_name_for_aws_session_token is None")
-    if args.s3_region is None:
-        raise Exception("Argument --s3_region is None")
-    if args.s3_path is None:
-        raise Exception("Argument --s3_path is None")
-
 
 # Example: python3 ./unload_databricks_data_to_s3.py --table_versions_map test_category_do_not_delete_or_modify.canary_tests.employee=16-16 --data_type EVENT --sql "select unix_millis(current_timestamp()) as time, id as user_id, \"databricks_import_canary_test_event\" as event_type, named_struct('name', name, 'home', home, 'age', age, 'income', income) as user_properties, named_struct('group_type1', ARRAY(\"group_A\", \"group_B\")) as groups, named_struct('group_property', \"group_property_value\") as group_properties from test_category_do_not_delete_or_modify.canary_tests.employee" --secret_scope amplitude_databricks_import --secret_key_name_for_aws_access_key source_destination_55_batch_1350266533_aws_access_key --secret_key_name_for_aws_secret_key source_destination_55_batch_1350266533_aws_secret_key --secret_key_name_for_aws_session_token source_destination_55_batch_1350266533_aws_session_token --s3_region us-west-2 --s3_path s3a://com-amplitude-falcon-stag2/databricks_import/unloaded_data/source_destination_55/batch_1350266533/
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='unload data from databricks using SparkPython')
-    parser.add_argument("--table_versions_map", nargs='?', default=None,
+    # replace 'required=True' with 'nargs='?', default=None' to make it optional.
+    parser.add_argument("--table_versions_map", required=True,
                         help="""tables and version ranges where data imported from.
         Format syntax is '[{tableVersion},...,{tableVersion*N}]'. '{tableVersion}' will be
         '{catalogName}.{schemaName}.{tableName}={startingVersion}-{endingVersion}'.
         Example: catalog1.schema1.table1=0-12,catalog2.schema2.table2=10-100 """)
-    parser.add_argument("--data_type", nargs='?', default=None,
+    parser.add_argument("--data_type", required=True,
                         choices=['EVENT', 'USER_PROPERTY', 'GROUP_PROPERTY'],
                         help="""type of data to be imported.
                             Valid values are ['EVENT', 'USER_PROPERTY', 'GROUP_PROPERTY'].""")
-    parser.add_argument("--sql", nargs='?', default=None, help="transformation sql")
-    parser.add_argument("--secret_scope", nargs='?', default=None, help="databricks secret scope name")
-    parser.add_argument("--secret_key_name_for_aws_access_key", nargs='?', default=None,
+    parser.add_argument("--sql", required=True, help="transformation sql")
+    parser.add_argument("--secret_scope", required=True, help="databricks secret scope name")
+    parser.add_argument("--secret_key_name_for_aws_access_key", required=True,
                         help="databricks secret key name of aws_access_key")
-    parser.add_argument("--secret_key_name_for_aws_secret_key", nargs='?', default=None,
+    parser.add_argument("--secret_key_name_for_aws_secret_key", required=True,
                         help="databricks secret key name of aws_secret_key")
-    parser.add_argument("--secret_key_name_for_aws_session_token", nargs='?', default=None,
+    parser.add_argument("--secret_key_name_for_aws_session_token", required=True,
                         help="databricks secret key name of aws_session_token")
-    parser.add_argument("--s3_region", nargs='?', default=None, help="s3 region")
-    parser.add_argument("--s3_path", nargs='?', default=None, help="s3 path where data will be written into")
+    parser.add_argument("--s3_region", required=True, help="s3 region")
+    parser.add_argument("--s3_path", required=True, help="s3 path where data will be written into")
 
     args, unknown = parser.parse_known_args()
-
-    validate_args(args)
 
     spark = SparkSession.builder.getOrCreate()
     # setup s3 credentials for data export
