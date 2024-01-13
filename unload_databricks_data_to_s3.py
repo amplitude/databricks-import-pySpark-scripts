@@ -76,25 +76,51 @@ def export_meta_data(event_count: int, partition_count: int):
     meta_data: list = [{'event_count': event_count, 'partition_count': partition_count}]
     spark.createDataFrame(meta_data).write.mode("overwrite").json(args.s3_path + "/meta")
 
+def validate_args(args):
+    if args.table_versions_map is None:
+        raise Exception("Argument --table_versions_map is None")
+    if args.data_type is None:
+        raise Exception("Argument --data_type is None")
+    if args.sql is None:
+        raise Exception("Argument --sql is None")
+    if args.secret_scope is None:
+        raise Exception("Argument --secret_scope is None")
+    if args.secret_key_name_for_aws_access_key is None:
+        raise Exception("Argument --secret_key_name_for_aws_access_key is None")
+    if args.secret_key_name_for_aws_secret_key is None:
+        raise Exception("Argument --secret_key_name_for_aws_secret_key is None")
+    if args.secret_key_name_for_aws_session_token is None:
+        raise Exception("Argument --secret_key_name_for_aws_session_token is None")
+    if args.s3_region is None:
+        raise Exception("Argument --s3_region is None")
+    if args.s3_path is None:
+        raise Exception("Argument --s3_path is None")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='unload data from databricks using SparkPython')
-    parser.add_argument("table_versions_map", help="""tables and version ranges where data imported from.
-    Format syntax is '[{tableVersion},...,{tableVersion*N}]'. '{tableVersion}' will be
-    '{catalogName}.{schemaName}.{tableName}={startingVersion}-{endingVersion}'.
-    Example: catalog1.schema1.table1=0-12,catalog2.schema2.table2=10-100 """)
-    parser.add_argument("data_type",
+    parser.add_argument("--table_versions_map", nargs='?', default=None,
+                        help="""tables and version ranges where data imported from.
+        Format syntax is '[{tableVersion},...,{tableVersion*N}]'. '{tableVersion}' will be
+        '{catalogName}.{schemaName}.{tableName}={startingVersion}-{endingVersion}'.
+        Example: catalog1.schema1.table1=0-12,catalog2.schema2.table2=10-100 """)
+    parser.add_argument("--data_type", nargs='?', default=None,
+                        choices=['EVENT', 'USER_PROPERTY', 'GROUP_PROPERTY'],
                         help="""type of data to be imported.
-                        Valid values are ['EVENT', 'USER_PROPERTY', 'GROUP_PROPERTY'].""")
-    parser.add_argument("sql", help="transformation sql")
-    parser.add_argument("secret_scope", help="databricks secret scope name")
-    parser.add_argument("secret_key_name_for_aws_access_key", help="databricks secret key name of aws_access_key")
-    parser.add_argument("secret_key_name_for_aws_secret_key", help="databricks secret key name of aws_secret_key")
-    parser.add_argument("secret_key_name_for_aws_session_token", help="databricks secret key name of aws_session_token")
-    parser.add_argument("s3_region", help="s3 region")
-    parser.add_argument("s3_path", help="s3 path where data will be written into")
+                            Valid values are ['EVENT', 'USER_PROPERTY', 'GROUP_PROPERTY'].""")
+    parser.add_argument("--sql", nargs='?', default=None, help="transformation sql")
+    parser.add_argument("--secret_scope", nargs='?', default=None, help="databricks secret scope name")
+    parser.add_argument("--secret_key_name_for_aws_access_key", nargs='?', default=None,
+                        help="databricks secret key name of aws_access_key")
+    parser.add_argument("--secret_key_name_for_aws_secret_key", nargs='?', default=None,
+                        help="databricks secret key name of aws_secret_key")
+    parser.add_argument("--secret_key_name_for_aws_session_token", nargs='?', default=None,
+                        help="databricks secret key name of aws_session_token")
+    parser.add_argument("--s3_region", nargs='?', default=None, help="s3 region")
+    parser.add_argument("--s3_path", nargs='?', default=None, help="s3 path where data will be written into")
 
     args = parser.parse_args()
+
+    validate_args(args)
 
     spark = SparkSession.builder.getOrCreate()
     # setup s3 credentials for data export
