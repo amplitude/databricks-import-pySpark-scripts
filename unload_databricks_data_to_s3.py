@@ -7,7 +7,7 @@ from pyspark.sql import SparkSession
 from pyspark.sql import DataFrame
 from pyspark.sql.functions import col
 
-MAX_EVENT_COUNT_PER_OUTPUT_FILE: int = 1_000_000
+MAX_RECORDS_PER_OUTPUT_FILE: int = 1_000_000
 
 
 def parse_table_versions_map_arg(table_versions_map: str) -> dict[str, list[int]]:
@@ -101,6 +101,7 @@ if __name__ == '__main__':
                         help="databricks secret key name of aws_session_token")
     parser.add_argument("--s3_region", required=True, help="s3 region")
     parser.add_argument("--s3_path", required=True, help="s3 path where data will be written into")
+    parser.add_argument("--max_records_per_file", help="max records per output file", nargs='?', type=int, default=MAX_RECORDS_PER_OUTPUT_FILE, const=MAX_RECORDS_PER_OUTPUT_FILE)
 
     args, unknown = parser.parse_known_args()
 
@@ -133,7 +134,7 @@ if __name__ == '__main__':
     if not export_data.isEmpty():
         event_count = export_data.count()
 
-        partition_count = get_partition_count(event_count, MAX_EVENT_COUNT_PER_OUTPUT_FILE)
+        partition_count = get_partition_count(event_count, args.max_records_per_file)
 
         # export meta data
         export_meta_data(event_count, partition_count)
