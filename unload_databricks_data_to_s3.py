@@ -9,6 +9,143 @@ from pyspark.sql.functions import col
 
 MAX_RECORDS_PER_OUTPUT_FILE: int = 1_000_000
 
+INITIAL_SYNC_SQL_TEMPLATE = """
+  SELECT
+    STRUCT(STRUCT(*) AS current_version) AS data,
+    'insert' as mutation_type,
+    '{mutation_row_type}' AS data_type,
+    UUID() as mutation_insert_id,
+    unix_timestamp() * 1000 as mutation_time_ms
+  FROM ({selectSql})
+"""
+
+CONTINUOUS_SYNC_SQL_TEMPLATE = """
+  WITH CdfData AS (
+    {cdfSelectSql}
+  ),
+  FormattedChanges AS (
+    SELECT STRUCT(* except(_change_type, _commit_version, _commit_timestamp)) AS data, _change_type, _commit_version, _commit_timestamp FROM CdfData
+  ),
+  Combined AS (
+    SELECT
+      STRUCT(
+        CASE WHEN c1._change_type = 'update_postimage' THEN c1.data ELSE c2.data END AS current_version,
+        CASE WHEN c1._change_type = 'update_preimage' THEN c1.data ELSE c2.data END AS previous_version
+      ) AS data,
+      'update' as _change_type,
+      c1._commit_timestamp,
+      c1._commit_version
+    FROM FormattedChanges c1
+    LEFT JOIN FormattedChanges c2 ON c1._commit_version = c2._commit_version AND c1._commit_timestamp = c2._commit_timestamp AND c1._change_type <> c2._change_type AND c1.data.{id_column} = c2.data.{id_column}
+    WHERE c1._change_type IN ('update_postimage', 'update_preimage') AND c2._change_type IN ('update_postimage', 'update_preimage')
+
+    UNION ALL
+
+    SELECT
+      STRUCT(
+        c1.data AS current_version,
+        null AS previous_version
+      ) as data,
+      c1._change_type,
+      c1._commit_timestamp,
+      c1._commit_version
+    FROM FormattedChanges c1
+    WHERE c1._change_type NOT IN ('update_postimage', 'update_preimage')
+  ),
+  DistinctData AS (
+    SELECT DISTINCT
+      data as data,
+      _change_type,
+      _commit_timestamp,
+      _commit_version
+    FROM Combined
+  )
+  SELECT
+    data,
+    _change_type as mutation_type,
+    '{mutation_row_type}' AS data_type,
+    UUID() as mutation_insert_id,
+    unix_timestamp(_commit_timestamp) * 1000 as mutation_time_ms
+  FROM DistinctData
+"""
+
+
+def normalize_sql_query(sql: str) -> str:
+    """
+    Normalize sql query to remove new lines, leading/trailing spaces, and replace multiple spaces with single space.
+    :param sql: sql query
+    :return: normalized sql query
+    """
+    return ' '.join(sql.split())
+
+
+def determine_first_table_name_in_sql(normalized_sql: str, table_names: set[str]) -> str:
+    """
+    Determine the first table name in the SQL query.
+    :param normalized_sql: SELECT SQL query without extra spaces and new lines
+    :param table_names: table names
+    :return: first table name in the SQL query
+    """
+    min_table_index: int = len(normalized_sql)
+    first_table_name: str = ""
+
+    for table_name in table_names:
+        table_index: int = normalized_sql.find(table_name)
+        if table_index != -1 and table_index < min_table_index:
+            min_table_index = table_index
+            first_table_name = table_name
+
+    return first_table_name
+
+
+def copy_and_inject_cdf_metadata_column_names(normalized_sql: str) -> str:
+    """
+    Creates a copy of the input SQL query with the CDF metadata column names injected into the SELECT clause.
+    :param normalized_sql: SELECT SQL query without extra spaces and new lines
+    :return: copy of the SQL query with CDF metadata column names injected into the SELECT clause
+    """
+    # Inject CDF metadata column names into the first SELECT clause
+    return normalized_sql.replace("select ", "select _commit_version, _commit_timestamp, _change_type, ", 1)
+
+
+def determine_id_column_name_for_mutation_row_type(mutation_row_type: str) -> str:
+    """
+    Determine the ID column name for the mutation row type. The ID column name should be required to be included in the
+    select clause of the SQL query and validated during source connection creation.
+    :param mutation_row_type: type of mutation row (e.g. http_api_event_json, http_api_user_json, http_api_group_json)
+    :return: ID column name for the mutation row type
+    """
+    if mutation_row_type == "http_api_event_json":
+        return "insert_id"
+    elif mutation_row_type == "http_api_user_json":
+        # TODO: Implement this when http_api_user_json requirements are finalized: AMP-96981
+        raise NotImplementedError("http_api_user_json is not supported yet.")
+    elif mutation_row_type == "http_api_group_json":
+        # TODO: Implement this when http_api_group_json requirements are finalized: AMP-96981
+        raise NotImplementedError("http_api_group_json is not supported yet.")
+    else:
+        raise ValueError("Invalid mutation row type: {mutation_row_type}".format(mutation_row_type=mutation_row_type))
+
+
+def generate_sql_to_unload_mutation_data(normalized_sql: str, mutation_row_type: str, is_initial_sync: bool) -> str:
+    """
+    Generates SQL query to unload mutation data.
+    :param normalized_sql: SELECT SQL query without extra spaces and new lines
+    :param mutation_row_type: type of mutation row (e.g. http_api_event_json, http_api_user_json, http_api_group_json)
+    :param is_initial_sync: boolean flag indicating if this is the initial unload for the source connection
+    :return: SQL query to unload mutation data
+    """
+
+    if is_initial_sync:
+        return INITIAL_SYNC_SQL_TEMPLATE.format(
+            selectSql=normalized_sql,
+            mutation_row_type=mutation_row_type)
+    else:
+        return CONTINUOUS_SYNC_SQL_TEMPLATE.format(
+            cdfSelectSql=copy_and_inject_cdf_metadata_column_names(normalized_sql),
+            mutation_row_type=mutation_row_type,
+            id_column=determine_id_column_name_for_mutation_row_type(mutation_row_type))
+
 
 def parse_table_versions_map_arg(table_versions_map: str) -> dict[str, list[int]]:
     """
@@ -77,7 +214,6 @@ def export_meta_data(event_count: int, partition_count: int):
     spark.createDataFrame(meta_data).write.mode("overwrite").json(args.s3_path + "/meta")
 
 
-
 # Example: python3 ./unload_databricks_data_to_s3.py --table_versions_map test_category_do_not_delete_or_modify.canary_tests.employee=16-16 --data_type EVENT --sql "select unix_millis(current_timestamp()) as time, id as user_id, \"databricks_import_canary_test_event\" as event_type, named_struct('name', name, 'home', home, 'age', age, 'income', income) as user_properties, named_struct('group_type1', ARRAY(\"group_A\", \"group_B\")) as groups, named_struct('group_property', \"group_property_value\") as group_properties from test_category_do_not_delete_or_modify.canary_tests.employee" --secret_scope amplitude_databricks_import --secret_key_name_for_aws_access_key source_destination_55_batch_1350266533_aws_access_key --secret_key_name_for_aws_secret_key source_destination_55_batch_1350266533_aws_secret_key --secret_key_name_for_aws_session_token source_destination_55_batch_1350266533_aws_session_token --s3_region us-west-2 --s3_endpoint s3.us-west-2.amazonaws.com --s3_path s3a://com-amplitude-falcon-stag2/databricks_import/unloaded_data/source_destination_55/batch_1350266533/
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='unload data from databricks using SparkPython')
@@ -102,7 +238,19 @@ if __name__ == '__main__':
     parser.add_argument("--s3_region", nargs='?', default=None, help="s3 region")
     parser.add_argument("--s3_endpoint", nargs='?', default=None, help="s3 endpoint")
     parser.add_argument("--s3_path", required=True, help="s3 path where data will be written into")
-    parser.add_argument("--max_records_per_file", help="max records per output file", nargs='?', type=int, default=MAX_RECORDS_PER_OUTPUT_FILE, const=MAX_RECORDS_PER_OUTPUT_FILE)
+    parser.add_argument("--max_records_per_file", help="max records per output file", nargs='?', type=int,
+                        default=MAX_RECORDS_PER_OUTPUT_FILE, const=MAX_RECORDS_PER_OUTPUT_FILE)
+    parser.add_argument("--unload_mutation_data",
+                        help="if provided, will include change data for all mutation types (insert, update, delete) "
+                             "in the resulting dataset along with DataBricks native metadata (i.e. _change_type, "
+                             "_commit_version, _commit_timestamp)",
+                        action='store_true', default=False)
+    parser.add_argument("--mutation_row_type",
+                        help="""type of mutation row to be included in the resulting dataset. Required if 
+                        --unload_mutation_data is provided. Valid values are ['http_api_event_json',
+                        'http_api_user_json', 'http_api_group_json']""",
+                        required=False,
+                        choices=['http_api_event_json', 'http_api_user_json', 'http_api_group_json'])
 
     args, unknown = parser.parse_known_args()
 
@@ -120,17 +268,30 @@ if __name__ == '__main__':
     if args.s3_endpoint is not None:
         spark.conf.set("fs.s3a.endpoint", args.s3_endpoint)
 
-    sql: str = args.sql
+    print(f'SQL query before normalization:\n{args.sql}')
+    sql: str = normalize_sql_query(args.sql)
+    print(f'SQL query after normalization:\n{sql}')
 
     # Build temp views
     table_to_import_version_range_map: dict[str, list[int]] = parse_table_versions_map_arg(args.table_versions_map)
+    first_table_name_in_sql: str = determine_first_table_name_in_sql(sql, set(table_to_import_version_range_map.keys()))
+    is_initial_sync: bool = True
     for table, import_version_range in table_to_import_version_range_map.items():
+        if table == first_table_name_in_sql:
+            is_initial_sync = import_version_range[0] == 0
+
         data: DataFrame = fetch_data(table, import_version_range[0], import_version_range[1])
-        data = filter_data(data, args.data_type)
+        # filter data if not unloading mutation data or table is not the first table in sql
+        if not args.unload_mutation_data or table != first_table_name_in_sql:
+            data = filter_data(data, args.data_type)
         view_name: str = build_temp_view_name(table)
         data.createOrReplaceTempView(view_name)
         # replace table name in sql to get prepared for sql transformation
         sql = sql.replace(table, view_name)
+
+    if args.unload_mutation_data:
+        sql = generate_sql_to_unload_mutation_data(sql, args.mutation_row_type, is_initial_sync)
+        print(f'SQL for unloading mutation data:\n{sql}')
 
     # run SQL to transform data
     export_data: DataFrame = spark.sql(sql)
