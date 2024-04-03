@@ -1,6 +1,7 @@
 import argparse
 import collections
 import math
+import re
 import time
 
 from pyspark.sql import SparkSession
@@ -105,7 +106,10 @@ def copy_and_inject_cdf_metadata_column_names(normalized_sql: str) -> str:
     :return: copy of the SQL query with CDF metadata column names injected into the SELECT clause
     """
     # Inject CDF metadata column names into the first SELECT clause
-    return normalized_sql.replace("select ", "select _commit_version, _commit_timestamp, _change_type, ", 1)
+    # Uses regex to replace the first occurrence of "select". The re.IGNORECASE flag is used to make the pattern
+    # case-insensitive
+    pattern = re.compile("select", re.IGNORECASE)
+    return pattern.sub("SELECT _commit_version, _commit_timestamp, _change_type,", normalized_sql, count=1)
 
 
 def determine_id_column_name_for_mutation_row_type(mutation_row_type: str) -> str:
