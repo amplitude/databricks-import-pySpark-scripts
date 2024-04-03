@@ -1,8 +1,11 @@
 import unittest
+from unittest.mock import MagicMock
+
 from unload_databricks_data_to_s3 import parse_table_versions_map_arg, build_sql_to_query_table_of_version, \
     build_sql_to_query_table_between_versions, get_partition_count, normalize_sql_query, \
     determine_first_table_name_in_sql, copy_and_inject_cdf_metadata_column_names, \
-    determine_id_column_name_for_mutation_row_type, generate_sql_to_unload_mutation_data
+    determine_id_column_name_for_mutation_row_type, generate_sql_to_unload_mutation_data, \
+    replace_double_slashes_with_single_slash, move_spark_metadata_to_separate_s3_folder
 
 
 class TestStringMethods(unittest.TestCase):
@@ -161,3 +164,41 @@ class TestStringMethods(unittest.TestCase):
         self.assertEqual(normalize_sql_query(expected_output),
                          normalize_sql_query(generate_sql_to_unload_mutation_data(
                              sql_query, mutation_row_type, is_initial_sync)))
+
+    def test_replace_double_slashes_with_single_slash(self):
+        input_string = '///path/to//file////with//double//////slashes/end/'
+        expected_output = '/path/to/file/with/double/slashes/end/'
+        self.assertEqual(expected_output, replace_double_slashes_with_single_slash(input_string))
+
+    def test_move_spark_metadata_to_separate_s3_folder(self):
+        # given
+        bucket = 'mybucket'
+        prefix = '/myprefix/with/subdir'
+        s3_uri = f's3://{bucket}/{prefix}'
+
+        mock_s3 = MagicMock()
+        mock_s3.list_objects_v2.return_value = {
+            'Contents': [
+                {'Key': f'{prefix}/file1'},
+                {'Key': f'{prefix}/part-file2'},
+                {'Key': f'{prefix}/file3'},
+                {'Key': f'{prefix}/part-file4'}
+            ]
+        }
+
+        # when
+        move_spark_metadata_to_separate_s3_folder(mock_s3, s3_uri)
+
+        # then
+        # Check that the list_objects_v2 method was called with the correct bucket and prefix
+        mock_s3.list_objects_v2.assert_called_with(Bucket='mybucket', Prefix='/myprefix/with/subdir', Delimiter='/')
+
+        # Check that the copy_object and delete_object methods were called for the correct files
+        mock_s3.copy_object.assert_any_call(Bucket='mybucket', CopySource='mybucket/myprefix/with/subdir/file1', Key='/myprefix/with/subdir/spark_metadata/file1')
+        mock_s3.delete_object.assert_any_call(Bucket='mybucket', Key='/myprefix/with/subdir/file1')
+        mock_s3.copy_object.assert_any_call(Bucket='mybucket', CopySource='mybucket/myprefix/with/subdir/file3', Key='/myprefix/with/subdir/spark_metadata/file3')
+        mock_s3.delete_object.assert_any_call(Bucket='mybucket', Key='/myprefix/with/subdir/file3')
+
+        # Check copy_object and delete_object were called the correct number of times
+        self.assertEqual(2, mock_s3.copy_object.call_count)
+        self.assertEqual(2, mock_s3.delete_object.call_count)
