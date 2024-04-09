@@ -150,4 +150,7 @@ if __name__ == '__main__':
     else:
         print("No events were exported.")
     # stop spark session
-    spark.stop()
+    try:
+        spark.stop()
+    except:
+        print("An error happened when stopping spark session")
