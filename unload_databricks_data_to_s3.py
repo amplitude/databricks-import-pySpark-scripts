@@ -149,8 +149,3 @@ if __name__ == '__main__':
         print("Unloaded {event_count} events.".format(event_count=event_count))
     else:
         print("No events were exported.")
-    # stop spark session
-    try:
-        spark.stop()
-    except:
-        print("An error happened when stopping spark session")
