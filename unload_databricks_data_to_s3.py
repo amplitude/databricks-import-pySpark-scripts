@@ -152,5 +152,5 @@ if __name__ == '__main__':
     # stop spark session
     try:
         spark.stop()
-    except:
-        print("An error happened when stopping spark session")
+    except BaseException as error:
+        print("An error happened when stopping spark session. Error {}", error)
