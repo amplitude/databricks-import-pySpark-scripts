@@ -93,12 +93,12 @@ if __name__ == '__main__':
                             Valid values are ['EVENT', 'USER_PROPERTY', 'GROUP_PROPERTY'].""")
     parser.add_argument("--sql", required=True, help="transformation sql")
     parser.add_argument("--secret_scope", required=True, help="databricks secret scope name")
-    parser.add_argument("--secret_key_name_for_aws_access_key", required=True,
-                        help="databricks secret key name of aws_access_key")
-    parser.add_argument("--secret_key_name_for_aws_secret_key", required=True,
-                        help="databricks secret key name of aws_secret_key")
-    parser.add_argument("--secret_key_name_for_aws_session_token", required=True,
-                        help="databricks secret key name of aws_session_token")
+    parser.add_argument("--aws_access_key", required=True,
+                        help="aws_access_key")
+    parser.add_argument("--aws_secret_key", required=True,
+                        help="aws_secret_key")
+    parser.add_argument("--aws_session_token", required=True,
+                        help="aws_session_token")
     parser.add_argument("--s3_region", nargs='?', default=None, help="s3 region")
     parser.add_argument("--s3_endpoint", nargs='?', default=None, help="s3 endpoint")
     parser.add_argument("--s3_path", required=True, help="s3 path where data will be written into")
@@ -108,9 +108,9 @@ if __name__ == '__main__':
 
     spark = SparkSession.builder.getOrCreate()
     # setup s3 credentials for data export
-    aws_access_key = dbutils.secrets.get(scope=args.secret_scope, key=args.secret_key_name_for_aws_access_key)
-    aws_secret_key = dbutils.secrets.get(scope=args.secret_scope, key=args.secret_key_name_for_aws_secret_key)
-    aws_session_token = dbutils.secrets.get(scope=args.secret_scope, key=args.secret_key_name_for_aws_session_token)
+    aws_access_key = args.aws_access_key
+    aws_secret_key = args.aws_secret_key
+    aws_session_token = args.aws_session_token
     spark.conf.set("fs.s3a.aws.credentials.provider", "org.apache.hadoop.fs.s3a.TemporaryAWSCredentialsProvider")
     spark.conf.set("fs.s3a.access.key", aws_access_key)
     spark.conf.set("fs.s3a.secret.key", aws_secret_key)
