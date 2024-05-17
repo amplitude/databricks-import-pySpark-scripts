@@ -88,9 +88,8 @@ if __name__ == '__main__':
         '{catalogName}.{schemaName}.{tableName}={startingVersion}-{endingVersion}'.
         Example: catalog1.schema1.table1=0-12,catalog2.schema2.table2=10-100 """)
     parser.add_argument("--data_type", required=True,
-                        choices=['EVENT', 'USER_PROPERTY', 'GROUP_PROPERTY'],
-                        help="""type of data to be imported.
-                            Valid values are ['EVENT', 'USER_PROPERTY', 'GROUP_PROPERTY'].""")
+                        choices=['EVENT', 'USER_PROPERTY', 'GROUP_PROPERTY', 'WAREHOUSE_PROPERTY'],
+                        help="""type of data to be imported.""")
     parser.add_argument("--sql", required=True, help="transformation sql")
     parser.add_argument("--secret_scope", required=True, help="databricks secret scope name")
     parser.add_argument("--secret_key_name_for_aws_access_key", required=True,
@@ -102,7 +101,13 @@ if __name__ == '__main__':
     parser.add_argument("--s3_region", nargs='?', default=None, help="s3 region")
     parser.add_argument("--s3_endpoint", nargs='?', default=None, help="s3 endpoint")
     parser.add_argument("--s3_path", required=True, help="s3 path where data will be written into")
-    parser.add_argument("--max_records_per_file", help="max records per output file", nargs='?', type=int, default=MAX_RECORDS_PER_OUTPUT_FILE, const=MAX_RECORDS_PER_OUTPUT_FILE)
+    parser.add_argument("--max_records_per_file", help="max records per output file", nargs='?', type=int,
+                        default=MAX_RECORDS_PER_OUTPUT_FILE, const=MAX_RECORDS_PER_OUTPUT_FILE)
+    parser.add_argument("--disable_append_only_filter",
+                        help="""if provided, will include change data for all mutation actions (i.e. insert, update,
+                        delete) in the resulting dataset. Otherwise, will include append-only (i.e. insert) data in the
+                        resulting dataset. The filter is enabled by default.""",
+                        action='store_true', default=False)
 
     args, unknown = parser.parse_known_args()
 
@@ -126,7 +131,10 @@ if __name__ == '__main__':
     table_to_import_version_range_map: dict[str, list[int]] = parse_table_versions_map_arg(args.table_versions_map)
     for table, import_version_range in table_to_import_version_range_map.items():
         data: DataFrame = fetch_data(table, import_version_range[0], import_version_range[1])
-        data = filter_data(data, args.data_type)
+
+        if not args.disable_append_only_filter:
+            data = filter_data(data, args.data_type)
+
         view_name: str = build_temp_view_name(table)
         data.createOrReplaceTempView(view_name)
         # replace table name in sql to get prepared for sql transformation
