@@ -103,10 +103,10 @@ if __name__ == '__main__':
     parser.add_argument("--s3_path", required=True, help="s3 path where data will be written into")
     parser.add_argument("--max_records_per_file", help="max records per output file", nargs='?', type=int,
                         default=MAX_RECORDS_PER_OUTPUT_FILE, const=MAX_RECORDS_PER_OUTPUT_FILE)
-    parser.add_argument("--disable_append_only_filter",
-                        help="""if provided, will include change data for all mutation actions (i.e. insert, update,
-                        delete) in the resulting dataset. Otherwise, will include append-only (i.e. insert) data in the
-                        resulting dataset. The filter is enabled by default.""",
+    parser.add_argument("--ingestion_in_mutability_mode",
+                        help="""if provided, will not apply filter to exclude change data for some mutation actions.
+                        Otherwise, will include append-only (i.e. insert) for event data and upsert-only (i.e. insert
+                        and update_postimage) for user/group properties. The filter is enabled by default.""",
                         action='store_true', default=False)
 
     args, unknown = parser.parse_known_args()
@@ -132,7 +132,7 @@ if __name__ == '__main__':
     for table, import_version_range in table_to_import_version_range_map.items():
         data: DataFrame = fetch_data(table, import_version_range[0], import_version_range[1])
 
-        if not args.disable_append_only_filter:
+        if not args.ingestion_in_mutability_mode:
             data = filter_data(data, args.data_type)
 
         view_name: str = build_temp_view_name(table)
