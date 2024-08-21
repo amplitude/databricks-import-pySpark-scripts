@@ -39,19 +39,22 @@ def build_temp_view_name(table_full_name: str) -> str:
 
 
 def build_sql_to_query_table_of_version(table_full_name: str, ending_version: int) -> str:
-    return "select * from {table} version as of {version}".format(table=table_full_name, version=ending_version)
+    sql_statement = "select * from {table} version as of {version}".format(table=table_full_name, version=ending_version)
+    print("SQL statement to fetch data: {sql}.".format(sql=sql_statement))
+    return sql_statement
 
 
 def build_sql_to_query_table_between_versions(table_full_name: str, starting_version: int, ending_version: int) -> str:
-    return "select * from table_changes(\"{table}\", {starting_version}, {ending_version})".format(
+    sql_statement = "select * from table_changes(\"{table}\", {starting_version}, {ending_version})".format(
         table=table_full_name, starting_version=starting_version, ending_version=ending_version)
+    print("SQL statement to fetch data: {sql}.".format(sql=sql_statement))
+    return sql_statement
 
 
 def fetch_data(table_full_name: str, starting_version: int, ending_version: int) -> DataFrame:
     if starting_version == 0:
         return spark.sql(build_sql_to_query_table_of_version(table_full_name, ending_version))
     else:
-        # TODO: filter data
         return spark.sql(build_sql_to_query_table_between_versions(table_full_name, starting_version, ending_version))
 
 
