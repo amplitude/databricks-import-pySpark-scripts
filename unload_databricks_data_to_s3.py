@@ -101,8 +101,9 @@ if __name__ == '__main__':
                         help="databricks secret key name of aws_secret_key")
     parser.add_argument("--secret_key_name_for_aws_session_token", required=True,
                         help="databricks secret key name of aws_session_token")
-    parser.add_argument("--s3_region", nargs='?', default=None, help="s3 region")
-    parser.add_argument("--s3_endpoint", nargs='?', default=None, help="s3 endpoint")
+    parser.add_argument("--secret_key_name_for_sql", nargs='?', default=None,
+                        help="databricks secret key name of transformation sql")
+    parser.add_argument("--s3_endpoint", required=True, help="s3 endpoint")
     parser.add_argument("--s3_path", required=True, help="s3 path where data will be written into")
     parser.add_argument("--max_records_per_file", help="max records per output file", nargs='?', type=int,
                         default=MAX_RECORDS_PER_OUTPUT_FILE, const=MAX_RECORDS_PER_OUTPUT_FILE)
@@ -123,12 +124,10 @@ if __name__ == '__main__':
     spark.conf.set("fs.s3a.access.key", aws_access_key)
     spark.conf.set("fs.s3a.secret.key", aws_secret_key)
     spark.conf.set("fs.s3a.session.token", aws_session_token)
-    if args.s3_region is not None:
-        spark.conf.set("fs.s3a.endpoint.region", args.s3_region)
-    if args.s3_endpoint is not None:
-        spark.conf.set("fs.s3a.endpoint", args.s3_endpoint)
+    spark.conf.set("fs.s3a.endpoint", args.s3_endpoint)
 
-    sql: str = args.sql
+    sql: str = args.sql if args.secret_key_name_for_sql is None \
+        else dbutils.secrets.get(scope=args.secret_scope, key=args.secret_key_name_for_sql)
 
     # Build temp views
     table_to_import_version_range_map: dict[str, list[int]] = parse_table_versions_map_arg(args.table_versions_map)
