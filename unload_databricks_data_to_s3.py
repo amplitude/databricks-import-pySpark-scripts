@@ -93,7 +93,6 @@ if __name__ == '__main__':
     parser.add_argument("--data_type", required=True,
                         choices=['EVENT', 'USER_PROPERTY', 'GROUP_PROPERTY', 'WAREHOUSE_PROPERTY'],
                         help="""type of data to be imported.""")
-    parser.add_argument("--sql", required=True, help="transformation sql")
     parser.add_argument("--secret_scope", required=True, help="databricks secret scope name")
     parser.add_argument("--secret_key_name_for_aws_access_key", required=True,
                         help="databricks secret key name of aws_access_key")
@@ -101,7 +100,7 @@ if __name__ == '__main__':
                         help="databricks secret key name of aws_secret_key")
     parser.add_argument("--secret_key_name_for_aws_session_token", required=True,
                         help="databricks secret key name of aws_session_token")
-    parser.add_argument("--secret_key_name_for_sql", nargs='?', default=None,
+    parser.add_argument("--secret_key_name_for_sql", required=True,
                         help="databricks secret key name of transformation sql")
     parser.add_argument("--s3_endpoint", required=True, help="s3 endpoint")
     parser.add_argument("--s3_path", required=True, help="s3 path where data will be written into")
@@ -126,8 +125,7 @@ if __name__ == '__main__':
     spark.conf.set("fs.s3a.session.token", aws_session_token)
     spark.conf.set("fs.s3a.endpoint", args.s3_endpoint)
 
-    sql: str = args.sql if args.secret_key_name_for_sql is None \
-        else dbutils.secrets.get(scope=args.secret_scope, key=args.secret_key_name_for_sql)
+    sql: str = dbutils.secrets.get(scope=args.secret_scope, key=args.secret_key_name_for_sql)
 
     # Build temp views
     table_to_import_version_range_map: dict[str, list[int]] = parse_table_versions_map_arg(args.table_versions_map)
