@@ -93,7 +93,7 @@ if __name__ == '__main__':
     parser.add_argument("--data_type", required=True,
                         choices=['EVENT', 'USER_PROPERTY', 'GROUP_PROPERTY', 'WAREHOUSE_PROPERTY'],
                         help="""type of data to be imported.""")
-    parser.add_argument("--sql", required=True, help="transformation sql")
+    parser.add_argument("--sql", nargs='?', default=None, help="transformation sql")
     parser.add_argument("--secret_scope", required=True, help="databricks secret scope name")
     parser.add_argument("--secret_key_name_for_aws_access_key", required=True,
                         help="databricks secret key name of aws_access_key")
