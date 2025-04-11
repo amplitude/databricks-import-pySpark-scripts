@@ -143,8 +143,8 @@ if __name__ == '__main__':
     # run SQL to transform data
     export_data: DataFrame = spark.sql(sql)
 
-    if not export_data.isEmpty():
-        event_count = export_data.count()
+    # if not export_data.isEmpty():
+    #     event_count = export_data.count()
 
         # partition_count = get_partition_count(event_count, args.max_records_per_file)
 
@@ -153,7 +153,7 @@ if __name__ == '__main__':
 
         # export_data = export_data.repartition(partition_count)
         # export data
-        export_data.write.mode("overwrite").json(args.s3_path)
-        print("Unloaded {event_count} events.".format(event_count=event_count))
-    else:
-        print("No events were exported.")
+    export_data.write.mode("overwrite").json(args.s3_path)
+        # print("Unloaded {event_count} events.".format(event_count=event_count))
+    # else:
+    #     print("No events were exported.")
