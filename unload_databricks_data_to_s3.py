@@ -146,12 +146,12 @@ if __name__ == '__main__':
     if not export_data.isEmpty():
         event_count = export_data.count()
 
-        partition_count = get_partition_count(event_count, args.max_records_per_file)
+        # partition_count = get_partition_count(event_count, args.max_records_per_file)
 
         # export meta data
-        export_meta_data(event_count, partition_count)
+        # export_meta_data(event_count, partition_count)
 
-        export_data = export_data.repartition(partition_count)
+        # export_data = export_data.repartition(partition_count)
         # export data
         export_data.write.mode("overwrite").json(args.s3_path)
         print("Unloaded {event_count} events.".format(event_count=event_count))
