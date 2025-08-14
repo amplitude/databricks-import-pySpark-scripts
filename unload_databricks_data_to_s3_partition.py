@@ -8,6 +8,13 @@ from pyspark.sql import DataFrame
 from pyspark.sql.functions import col
 
 
+# cargo ingestion is impacted when the file size is greater than 2GB, because
+# the ingested files need to be broken down into smaller files by chopper
+# this value was adjusted from 1M down to 250K for the Zillow POC (2025-08-14)
+# to try to get Zillow files under 2GB each
+MAX_RECORDS_PER_OUTPUT_FILE: int = 250_000
+
+
 def parse_table_versions_map_arg(table_versions_map: str) -> dict[str, list[int]]:
     """
     Extract table && version range numbers from input str.
@@ -78,7 +85,6 @@ def export_meta_data(event_count: int, partition_count: int):
     spark.createDataFrame(meta_data).write.mode("overwrite").json(args.s3_path + "/meta")
 
 
-
 # Example: python3 ./unload_databricks_data_to_s3.py --table_versions_map test_category_do_not_delete_or_modify.canary_tests.employee=16-16 --data_type EVENT --sql "select unix_millis(current_timestamp()) as time, id as user_id, \"databricks_import_canary_test_event\" as event_type, named_struct('name', name, 'home', home, 'age', age, 'income', income) as user_properties, named_struct('group_type1', ARRAY(\"group_A\", \"group_B\")) as groups, named_struct('group_property', \"group_property_value\") as group_properties from test_category_do_not_delete_or_modify.canary_tests.employee" --secret_scope amplitude_databricks_import --secret_key_name_for_aws_access_key source_destination_55_batch_1350266533_aws_access_key --secret_key_name_for_aws_secret_key source_destination_55_batch_1350266533_aws_secret_key --secret_key_name_for_aws_session_token source_destination_55_batch_1350266533_aws_session_token --s3_region us-west-2 --s3_endpoint s3.us-west-2.amazonaws.com --s3_path s3a://com-amplitude-falcon-stag2/databricks_import/unloaded_data/source_destination_55/batch_1350266533/
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='unload data from databricks using SparkPython')
@@ -102,6 +108,8 @@ if __name__ == '__main__':
                         help="databricks secret key name of transformation sql")
     parser.add_argument("--s3_endpoint", required=True, help="s3 endpoint")
     parser.add_argument("--s3_path", required=True, help="s3 path where data will be written into")
+    parser.add_argument("--max_records_per_file", help="max records per output file", nargs='?', type=int,
+                        default=MAX_RECORDS_PER_OUTPUT_FILE, const=MAX_RECORDS_PER_OUTPUT_FILE)
     parser.add_argument("--ingestion_in_mutability_mode",
                         help="""if provided, will not apply filter to exclude change data for some mutation actions.
                         Otherwise, will include append-only (i.e. insert) for event data and upsert-only (i.e. insert
@@ -139,5 +147,5 @@ if __name__ == '__main__':
     # run SQL to transform data
     export_data: DataFrame = spark.sql(sql)
 
-    # exprot data
-    export_data.write.mode("overwrite").json(args.s3_path)
+    # export data
+    export_data.write.mode("overwrite").option("maxRecordsPerFile", args.max_records_per_file).json(args.s3_path)
