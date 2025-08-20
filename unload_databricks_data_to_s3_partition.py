@@ -147,5 +147,7 @@ if __name__ == '__main__':
     # run SQL to transform data
     export_data: DataFrame = spark.sql(sql)
 
+    num_partitions = math.ceil(export_data.count() / args.max_records_per_file)
+
     # export data
-    export_data.write.mode("overwrite").option("maxRecordsPerFile", args.max_records_per_file).json(args.s3_path)
+    export_data.repartition(num_partitions).write.mode("overwrite").json(args.s3_path)
