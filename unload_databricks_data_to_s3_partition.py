@@ -10,9 +10,9 @@ from pyspark.sql.functions import col
 
 # cargo ingestion is impacted when the file size is greater than 2GB, because
 # the ingested files need to be broken down into smaller files by chopper
-# this value was adjusted from 1M down to 250K for the Zillow POC (2025-08-14)
+# this value was adjusted from 1M down to 25K for the Zillow POC (2025-08-14)
 # to try to get Zillow files under 2GB each
-MAX_RECORDS_PER_OUTPUT_FILE: int = 250_000
+MAX_RECORDS_PER_OUTPUT_FILE: int = 25_000
 
 
 def parse_table_versions_map_arg(table_versions_map: str) -> dict[str, list[int]]:
