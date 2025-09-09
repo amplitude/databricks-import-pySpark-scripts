@@ -115,6 +115,10 @@ if __name__ == '__main__':
                         Otherwise, will include append-only (i.e. insert) for event data and upsert-only (i.e. insert
                         and update_postimage) for user/group properties. The filter is enabled by default.""",
                         action='store_true', default=False)
+    parser.add_argument("--format", choices=['json', 'parquet'], default='json',
+                        help="Output format: json (current behavior) or parquet")
+    parser.add_argument("--compression", choices=['none', 'zstd'], default='none',
+                        help="Compression type: none (no compression) or zstd (zstd level 3)")
 
     args, unknown = parser.parse_known_args()
 
@@ -150,4 +154,14 @@ if __name__ == '__main__':
     num_partitions = math.ceil(export_data.count() / args.max_records_per_file)
 
     # export data
-    export_data.repartition(num_partitions).write.mode("overwrite").json(args.s3_path)
+    writer = export_data.repartition(num_partitions).write.mode("overwrite")
+    
+    if args.format == 'json':
+        writer.json(args.s3_path)
+    elif args.format == 'parquet':
+        if args.compression == 'zstd':
+            writer.option("compression", "zstd").option("compressionLevel", 3).parquet(args.s3_path)
+        else:  # args.compression == 'none'
+            writer.option("compression", "none").parquet(args.s3_path)
+    else:
+        raise ValueError(f"Unsupported format: {args.format}")
