@@ -116,16 +116,10 @@ if __name__ == '__main__':
                         and update_postimage) for user/group properties. The filter is enabled by default.""",
                         action='store_true', default=False)
     parser.add_argument("--format", choices=['json', 'parquet'], default='json',
-                        help="Output format: json (current behavior) or parquet")
-    parser.add_argument("--compression", choices=['none', 'zstd'], default='none',
-                        help="Compression type for Parquet format: none (no compression) or zstd (zstd level 3). Only 'none' is supported for JSON format.")
+                        help="Output format: json (uncompressed) or parquet (zstd level 3)")
 
     args, unknown = parser.parse_known_args()
     
-    # Validate argument combinations
-    if args.format == 'json' and args.compression != 'none':
-        raise ValueError(f"Compression '{args.compression}' is not supported for JSON format. Use --compression none with --format json.")
-
     spark = SparkSession.builder.getOrCreate()
     # setup s3 credentials for data export
     aws_access_key = dbutils.secrets.get(scope=args.secret_scope, key=args.secret_key_name_for_aws_access_key)
@@ -163,9 +157,6 @@ if __name__ == '__main__':
     if args.format == 'json':
         writer.json(args.s3_path)
     elif args.format == 'parquet':
-        if args.compression == 'zstd':
-            writer.option("compression", "zstd").option("compressionLevel", 3).parquet(args.s3_path)
-        else:  # args.compression == 'none'
-            writer.option("compression", "uncompressed").parquet(args.s3_path)
+        writer.option("compression", "zstd").option("compressionLevel", 3).parquet(args.s3_path)
     else:
         raise ValueError(f"Unsupported format: {args.format}")
