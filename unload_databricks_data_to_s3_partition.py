@@ -119,7 +119,7 @@ if __name__ == '__main__':
                         help="Output format: json (uncompressed) or parquet (zstd level 3)")
 
     args, unknown = parser.parse_known_args()
-    
+
     spark = SparkSession.builder.getOrCreate()
     # setup s3 credentials for data export
     aws_access_key = dbutils.secrets.get(scope=args.secret_scope, key=args.secret_key_name_for_aws_access_key)
