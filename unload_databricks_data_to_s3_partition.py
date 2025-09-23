@@ -2,10 +2,21 @@ import argparse
 import collections
 import math
 import time
+from datetime import datetime
 
 from pyspark.sql import SparkSession
 from pyspark.sql import DataFrame
 from pyspark.sql.functions import col
+
+
+def get_timestamp() -> str:
+    """Get formatted timestamp for logging"""
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+
+
+def timing_log(message: str) -> None:
+    """Print a timing log with timestamp prefix"""
+    print(f"TIMING: [{get_timestamp()}] {message}")
 
 
 # cargo ingestion is impacted when the file size is greater than 2GB, because
@@ -79,6 +90,45 @@ def filter_data(data_frame: DataFrame, data_type: str) -> DataFrame:
 def get_partition_count(event_count: int, max_event_count_per_output_file: int) -> int:
     return max(1, math.ceil(event_count / max_event_count_per_output_file))
 
+def apply_performance_optimizations(spark: SparkSession, max_records_per_file: int):
+    """Apply performance optimizations for S3 upload and large data processing"""
+    timing_log("Applying Spark performance optimizations...")
+    optimization_start = time.time()
+    
+    # Automatic partition sizing (prevents oversized files)
+    # Controls max records per output file - Spark automatically splits files during write
+    # Prevents Cargo chopper from needing to split oversized files (>2GB) later
+    spark.conf.set("spark.sql.files.maxRecordsPerFile", str(max_records_per_file))
+    
+    # Adaptive Query Execution (AQE) - larger partition size for better performance
+    # Default 64MB is too small for large datasets - 1GB reduces shuffle overhead
+    # Helps consolidate small partitions during processing
+    spark.conf.set("spark.sql.adaptive.advisoryPartitionSizeInBytes", "1073741824")
+    
+    # S3 Upload Optimizations
+    # Multipart upload size: 128MB parts instead of default 5MB - faster uploads for large files
+    # Larger parts = fewer HTTP requests = better throughput
+    spark.conf.set("spark.hadoop.fs.s3a.multipart.size", "134217728")
+    # Threshold for multipart uploads: start multipart at 128MB instead of 5MB
+    # Files smaller than this use single-part uploads (more efficient)
+    spark.conf.set("spark.hadoop.fs.s3a.multipart.threshold", "134217728") 
+    # Direct streaming to S3 without local temp files - saves disk I/O and space
+    spark.conf.set("spark.hadoop.fs.s3a.fast.upload", "true")
+    # Max upload threads per executor: 20 instead of default 10 - higher concurrency
+    spark.conf.set("spark.hadoop.fs.s3a.threads.max", "20")
+    # Max HTTP connections to S3: 200 instead of default 100 - supports more parallel uploads
+    spark.conf.set("spark.hadoop.fs.s3a.connection.maximum", "200")
+    
+    # Memory and serialization optimizations
+    # Kryo serializer: faster and more compact than Java serialization
+    # Improves shuffle performance and reduces memory usage
+    spark.conf.set("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
+    # Apache Arrow: zero-copy data transfer between JVM and Python
+    # Speeds up DataFrame operations and reduces memory overhead
+    spark.conf.set("spark.sql.execution.arrow.pyspark.enabled", "true")
+    
+    optimization_end = time.time()
+    timing_log(f"Performance optimizations applied in {optimization_end - optimization_start:.2f}s")
 
 def export_meta_data(event_count: int, partition_count: int):
     meta_data: list = [{'event_count': event_count, 'partition_count': partition_count}]
@@ -117,10 +167,17 @@ if __name__ == '__main__':
                         action='store_true', default=False)
     parser.add_argument("--format", choices=['json', 'parquet'], default='json',
                         help="Output format: json (uncompressed) or parquet (zstd level 3)")
+    parser.add_argument("--enable-spark-optimizations", action='store_true', default=False, 
+                        help="Enable Spark performance optimizations (S3 upload, AQE, smart partition sizing)")
 
     args, unknown = parser.parse_known_args()
 
     spark = SparkSession.builder.getOrCreate()
+    
+    # Apply Spark performance optimizations if requested
+    if args.enable_spark_optimizations:
+        apply_performance_optimizations(spark, args.max_records_per_file)
+    
     # setup s3 credentials for data export
     aws_access_key = dbutils.secrets.get(scope=args.secret_scope, key=args.secret_key_name_for_aws_access_key)
     aws_secret_key = dbutils.secrets.get(scope=args.secret_scope, key=args.secret_key_name_for_aws_secret_key)
@@ -149,10 +206,28 @@ if __name__ == '__main__':
     # run SQL to transform data
     export_data: DataFrame = spark.sql(sql)
 
-    num_partitions = math.ceil(export_data.count() / args.max_records_per_file)
-
-    # export data
-    writer = export_data.repartition(num_partitions).write.mode("overwrite")
+    # Partition strategy based on Spark optimization setting
+    if args.enable_spark_optimizations:
+        # Let Spark handle partition sizing automatically via maxRecordsPerFile
+        # This is the most efficient approach - Spark will automatically split partitions during write
+        print(f"Spark will automatically enforce max {args.max_records_per_file:,} records/file during write")
+        writer = export_data.write.mode("overwrite")
+    else:
+        # Original method: expensive count() + repartition
+        count_start_time = time.time()
+        timing_log("Starting DataFrame count operation")
+        row_count = export_data.count()
+        count_end_time = time.time()
+        timing_log(f"DataFrame count completed in {count_end_time - count_start_time:.2f}s (rows: {row_count:,})")
+        
+        num_partitions = math.ceil(row_count / args.max_records_per_file)
+        print(f"Calculated partitions: {num_partitions} (max_records_per_file: {args.max_records_per_file:,})")
+        
+        # Use repartition (original method)
+        writer = export_data.repartition(num_partitions).write.mode("overwrite")
+    
+    write_start_time = time.time()
+    timing_log(f"Starting DataFrame execution and S3 write (format: {args.format})")
     
     if args.format == 'json':
         writer.json(args.s3_path)
@@ -160,3 +235,7 @@ if __name__ == '__main__':
         writer.option("compression", "zstd").option("compressionLevel", 3).parquet(args.s3_path)
     else:
         raise ValueError(f"Unsupported format: {args.format}")
+    
+    write_end_time = time.time()
+    timing_log(f"DataFrame execution and S3 write completed in {write_end_time - write_start_time:.2f}s")
+    timing_log(f"Data successfully written to {args.s3_path}")
