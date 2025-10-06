@@ -107,6 +107,20 @@ if __name__ == '__main__':
                         Otherwise, will include append-only (i.e. insert) for event data and upsert-only (i.e. insert
                         and update_postimage) for user/group properties. The filter is enabled by default.""",
                         action='store_true', default=False)
+    parser.add_argument("--partitioned",
+                        action='store_true',
+                        default=False,
+                        help="Enable partitioning based on max_records_per_file")
+    parser.add_argument("--max_records_per_file",
+                        help="max records per output file (only used if --partitioned is set)",
+                        nargs='?',
+                        type=int,
+                        default=100000,
+                        const=100000)
+    parser.add_argument("--format",
+                        choices=['json', 'parquet'],
+                        default='json',
+                        help="Output format: json (uncompressed) or parquet (zstd level 3)")
 
     args, unknown = parser.parse_known_args()
 
@@ -139,5 +153,19 @@ if __name__ == '__main__':
     # run SQL to transform data
     export_data: DataFrame = spark.sql(sql)
 
-    # exprot data
-    export_data.write.mode("overwrite").json(args.s3_path)
+    # export data with conditional partitioning and format selection
+    if args.partitioned:
+        # Calculate number of partitions based on max records per file
+        num_partitions = math.ceil(export_data.count() / args.max_records_per_file)
+        writer = export_data.repartition(num_partitions).write.mode("overwrite")
+    else:
+        # No repartitioning - current simple script behavior
+        writer = export_data.write.mode("overwrite")
+
+    # Write in requested format
+    if args.format == 'json':
+        writer.json(args.s3_path)
+    elif args.format == 'parquet':
+        writer.option("compression", "zstd").option("compressionLevel", 3).parquet(args.s3_path)
+    else:
+        raise ValueError(f"Unsupported format: {args.format}")
