@@ -112,7 +112,7 @@ if __name__ == '__main__':
                         default='none',
                         help="Partitioning strategy: none (default), repartition (split based on max_records_per_file), coalesce (future use)")
     parser.add_argument("--max_records_per_file",
-                        help="max records per output file (only used with repartition strategy)",
+                        help="max records per output file (only with --partitioning-strategy: repartition, coalesce)",
                         nargs='?',
                         type=int,
                         default=100000,
@@ -153,7 +153,11 @@ if __name__ == '__main__':
     # run SQL to transform data
     export_data: DataFrame = spark.sql(sql)
 
-    # export data with conditional partitioning and format selection
+    # Validate max_records_per_file for any partitioning strategy
+    if args.partitioning_strategy != 'none' and args.max_records_per_file <= 0:
+        raise ValueError(f"max_records_per_file must be greater than 0 when using partitioning strategy '{args.partitioning_strategy}', got {args.max_records_per_file}")
+    
+    # Apply partitioning strategy
     if args.partitioning_strategy == 'repartition':
         # Calculate number of partitions based on max records per file
         num_partitions = math.ceil(export_data.count() / args.max_records_per_file)
