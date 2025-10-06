@@ -107,12 +107,12 @@ if __name__ == '__main__':
                         Otherwise, will include append-only (i.e. insert) for event data and upsert-only (i.e. insert
                         and update_postimage) for user/group properties. The filter is enabled by default.""",
                         action='store_true', default=False)
-    parser.add_argument("--partitioned",
-                        action='store_true',
-                        default=False,
-                        help="Enable partitioning based on max_records_per_file")
+    parser.add_argument("--partitioning-strategy",
+                        choices=['none', 'repartition', 'coalesce'],
+                        default='none',
+                        help="Partitioning strategy: none (default), repartition (split based on max_records_per_file), coalesce (future use)")
     parser.add_argument("--max_records_per_file",
-                        help="max records per output file (only used if --partitioned is set)",
+                        help="max records per output file (only used with repartition strategy)",
                         nargs='?',
                         type=int,
                         default=100000,
@@ -154,11 +154,13 @@ if __name__ == '__main__':
     export_data: DataFrame = spark.sql(sql)
 
     # export data with conditional partitioning and format selection
-    if args.partitioned:
+    if args.partitioning_strategy == 'repartition':
         # Calculate number of partitions based on max records per file
         num_partitions = math.ceil(export_data.count() / args.max_records_per_file)
         writer = export_data.repartition(num_partitions).write.mode("overwrite")
-    else:
+    elif args.partitioning_strategy == 'coalesce':
+        raise NotImplementedError("Coalesce partitioning strategy is not yet implemented")
+    else:  # default to 'none'
         # No repartitioning - current simple script behavior
         writer = export_data.write.mode("overwrite")
 
