@@ -27,7 +27,7 @@ def _drop_nulltype_fields(col: Column, dtype: DataType) -> Column:
             f for f in dtype.fields if not isinstance(f.dataType, NullType)
         ]
         if not valid_fields:
-            # Struct becomes completely empty; return null literal
+            # Struct becomes completely empty; return null (Spark has issues with empty structs)
             return F.lit(None)
         return F.struct(*[
             _drop_nulltype_fields(col.getField(f.name), f.dataType).alias(f.name)
@@ -35,14 +35,16 @@ def _drop_nulltype_fields(col: Column, dtype: DataType) -> Column:
         ])
 
     elif isinstance(dtype, ArrayType):
-        # Recurse into elements
-        return F.transform(col, lambda x: _drop_nulltype_fields(x, dtype.elementType))
+        # Clean each element, then DROP null elements; empty arrays remain []
+        cleaned = F.transform(col, lambda x: _drop_nulltype_fields(x, dtype.elementType))
+        cleaned = F.filter(cleaned, lambda x: x.isNotNull())
+        return cleaned
 
     elif isinstance(dtype, MapType):
         # Maps can't have NullType keys, but we can clean NullType values
         if isinstance(dtype.valueType, NullType):
-            # Drop all entries (no meaningful values)
-            return F.lit(None)
+            # {} : build from empty entries to preserve "empty map"
+            return F.map_from_arrays(F.array(), F.array())
         return F.map_from_entries(
             F.transform(
                 F.map_entries(col),
@@ -70,6 +72,12 @@ def drop_void_fields(df: DataFrame) -> DataFrame:
     for f in df.schema.fields:
         if isinstance(f.dataType, NullType):
             # Skip VOID columns entirely
+            continue
+        elif isinstance(f.dataType, ArrayType) and isinstance(f.dataType.elementType, NullType):
+            # Skip arrays of void entirely
+            continue
+        elif isinstance(f.dataType, MapType) and isinstance(f.dataType.valueType, NullType):
+            # Skip maps with void values entirely
             continue
         new_cols.append(_drop_nulltype_fields(F.col(f.name), f.dataType).alias(f.name))
     return df.select(*new_cols)
