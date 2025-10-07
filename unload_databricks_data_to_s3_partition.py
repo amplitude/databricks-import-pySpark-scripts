@@ -4,12 +4,8 @@ import math
 import time
 
 from pyspark.sql import SparkSession
-from pyspark.sql import DataFrame, Column
+from pyspark.sql import DataFrame
 from pyspark.sql.functions import col
-from pyspark.sql import functions as F
-from pyspark.sql.types import (
-    StructType, ArrayType, MapType, NullType, DataType
-)
 
 # cargo ingestion is impacted when the file size is greater than 2GB, because
 # the ingested files need to be broken down into smaller files by chopper
