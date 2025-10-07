@@ -139,7 +139,7 @@ if __name__ == '__main__':
     spark.conf.set("fs.s3a.secret.key", aws_secret_key)
     spark.conf.set("fs.s3a.session.token", aws_session_token)
     spark.conf.set("fs.s3a.endpoint", args.s3_endpoint)
-    spark.conf.set("spark.sql.files.maxRecordsPerFile", args.max_records_per_file)
+
 
     sql: str = dbutils.secrets.get(scope=args.secret_scope, key=args.secret_key_name_for_sql)
 
@@ -170,6 +170,7 @@ if __name__ == '__main__':
         num_partitions = math.ceil(export_data.count() / args.max_records_per_file)
         writer = export_data.repartition(num_partitions).write.mode("overwrite")
     elif args.partitioning_strategy == 'coalesce':
+        spark.conf.set("spark.sql.files.maxRecordsPerFile", args.max_records_per_file)
         # Calculate desired number of partitions to consolidate partitions to avoid small files
         num_partitions = math.ceil(export_data.count() / args.max_records_per_file)
         writer = export_data.coalesce(num_partitions).write.mode("overwrite")
