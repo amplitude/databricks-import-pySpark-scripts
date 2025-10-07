@@ -4,9 +4,83 @@ import math
 import time
 
 from pyspark.sql import SparkSession
-from pyspark.sql import DataFrame
+from pyspark.sql import DataFrame, Column
 from pyspark.sql.functions import col
+from pyspark.sql import functions as F
+from pyspark.sql.types import (
+    StructType, ArrayType, MapType, NullType, DataType
+)
 
+# cargo ingestion is impacted when the file size is greater than 2GB, because
+# the ingested files need to be broken down into smaller files by chopper
+# this value was adjusted from 1M down to 100K for the Zillow POC (2025-08-14)
+# to try to get Zillow files under 2GB each
+MAX_RECORDS_PER_OUTPUT_FILE: int = 100_000
+
+def _drop_nulltype_fields(col: Column, dtype: DataType) -> Column:
+    """
+    Recursively remove NullType (VOID) fields from a column while preserving structure.
+    """
+    if isinstance(dtype, StructType):
+        # Keep only fields that are not NullType
+        valid_fields = [
+            f for f in dtype.fields if not isinstance(f.dataType, NullType)
+        ]
+        if not valid_fields:
+            # Struct becomes completely empty; return null (Spark has issues with empty structs)
+            return F.lit(None)
+        return F.struct(*[
+            _drop_nulltype_fields(col.getField(f.name), f.dataType).alias(f.name)
+            for f in valid_fields
+        ])
+
+    elif isinstance(dtype, ArrayType):
+        # Clean each element, then DROP null elements; empty arrays remain []
+        cleaned = F.transform(col, lambda x: _drop_nulltype_fields(x, dtype.elementType))
+        cleaned = F.filter(cleaned, lambda x: x.isNotNull())
+        return cleaned
+
+    elif isinstance(dtype, MapType):
+        # Maps can't have NullType keys, but we can clean NullType values
+        if isinstance(dtype.valueType, NullType):
+            # {} : build from empty entries to preserve "empty map"
+            return F.map_from_arrays(F.array(), F.array())
+        return F.map_from_entries(
+            F.transform(
+                F.map_entries(col),
+                lambda kv: F.struct(
+                    kv["key"].alias("key"),
+                    _drop_nulltype_fields(kv["value"], dtype.valueType).alias("value")
+                )
+            )
+        )
+
+    elif isinstance(dtype, NullType):
+        # Drop this field (return None)
+        return F.lit(None)
+
+    else:
+        # Non-nulltype primitive or supported data type
+        return col
+
+
+def drop_void_fields(df: DataFrame) -> DataFrame:
+    """
+    Returns a new DataFrame with all NullType (VOID) fields removed recursively.
+    """
+    new_cols = []
+    for f in df.schema.fields:
+        if isinstance(f.dataType, NullType):
+            # Skip VOID columns entirely
+            continue
+        elif isinstance(f.dataType, ArrayType) and isinstance(f.dataType.elementType, NullType):
+            # Skip arrays of void entirely
+            continue
+        elif isinstance(f.dataType, MapType) and isinstance(f.dataType.valueType, NullType):
+            # Skip maps with void values entirely
+            continue
+        new_cols.append(_drop_nulltype_fields(F.col(f.name), f.dataType).alias(f.name))
+    return df.select(*new_cols)
 
 def parse_table_versions_map_arg(table_versions_map: str) -> dict[str, list[int]]:
     """
@@ -107,6 +181,20 @@ if __name__ == '__main__':
                         Otherwise, will include append-only (i.e. insert) for event data and upsert-only (i.e. insert
                         and update_postimage) for user/group properties. The filter is enabled by default.""",
                         action='store_true', default=False)
+    parser.add_argument("--partitioning-strategy",
+                        choices=['none', 'repartition', 'coalesce'],
+                        default='none',
+                        help="Partitioning strategy: none (default), repartition (split based on max_records_per_file), coalesce (future use)")
+    parser.add_argument("--max_records_per_file",
+                        help="max records per output file",
+                        nargs='?',
+                        type=int,
+                        default=MAX_RECORDS_PER_OUTPUT_FILE,
+                        const=MAX_RECORDS_PER_OUTPUT_FILE)
+    parser.add_argument("--format",
+                        choices=['json', 'parquet'],
+                        default='json',
+                        help="Output format: json (uncompressed) or parquet (zstd level 3)")
 
     args, unknown = parser.parse_known_args()
 
@@ -120,6 +208,7 @@ if __name__ == '__main__':
     spark.conf.set("fs.s3a.secret.key", aws_secret_key)
     spark.conf.set("fs.s3a.session.token", aws_session_token)
     spark.conf.set("fs.s3a.endpoint", args.s3_endpoint)
+
 
     sql: str = dbutils.secrets.get(scope=args.secret_scope, key=args.secret_key_name_for_sql)
 
@@ -139,5 +228,30 @@ if __name__ == '__main__':
     # run SQL to transform data
     export_data: DataFrame = spark.sql(sql)
 
-    # exprot data
-    export_data.write.mode("overwrite").json(args.s3_path)
+    # Validate max_records_per_file for any partitioning strategy
+    if args.partitioning_strategy != 'none' and args.max_records_per_file <= 0:
+        raise ValueError(f"max_records_per_file must be greater than 0 when using partitioning strategy '{args.partitioning_strategy}', got {args.max_records_per_file}")
+    
+    # Apply partitioning strategy
+    # export data with conditional partitioning and format selection
+    if args.partitioning_strategy == 'repartition':
+        # Calculate number of partitions based on max records per file
+        num_partitions = math.ceil(export_data.count() / args.max_records_per_file)
+        export_data = export_data.repartition(num_partitions)
+    elif args.partitioning_strategy == 'coalesce':
+        # TODO - enable this for all partition strategy in future. Not doing that now just be safe.
+        spark.conf.set("spark.sql.files.maxRecordsPerFile", args.max_records_per_file)
+        # Calculate desired number of partitions to consolidate partitions to avoid small files
+        num_partitions = math.ceil(export_data.count() / args.max_records_per_file)
+        export_data = export_data.coalesce(num_partitions)
+    else:  # default to 'none'
+        pass
+
+    # Write in requested format
+    if args.format == 'json':
+        export_data.write.mode("overwrite").json(args.s3_path)
+    elif args.format == 'parquet':
+        export_data = drop_void_fields(export_data)
+        export_data.write.mode("overwrite").option("compression", "zstd").option("compressionLevel", 3).parquet(args.s3_path)
+    else:
+        raise ValueError(f"Unsupported format: {args.format}")

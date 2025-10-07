@@ -7,13 +7,11 @@ from pyspark.sql import SparkSession
 from pyspark.sql import DataFrame
 from pyspark.sql.functions import col
 
-
 # cargo ingestion is impacted when the file size is greater than 2GB, because
 # the ingested files need to be broken down into smaller files by chopper
 # this value was adjusted from 1M down to 100K for the Zillow POC (2025-08-14)
 # to try to get Zillow files under 2GB each
 MAX_RECORDS_PER_OUTPUT_FILE: int = 100_000
-
 
 def parse_table_versions_map_arg(table_versions_map: str) -> dict[str, list[int]]:
     """
@@ -152,11 +150,12 @@ if __name__ == '__main__':
     num_partitions = math.ceil(export_data.count() / args.max_records_per_file)
 
     # export data
-    writer = export_data.repartition(num_partitions).write.mode("overwrite")
+    export_data = export_data.repartition(num_partitions)
     
     if args.format == 'json':
-        writer.json(args.s3_path)
+        export_data.write.mode("overwrite").json(args.s3_path)
     elif args.format == 'parquet':
-        writer.option("compression", "zstd").option("compressionLevel", 3).parquet(args.s3_path)
+        # Drop any NullType/VOID for Parquet
+        export_data.write.mode("overwrite").option("compression", "zstd").option("compressionLevel", 3).parquet(args.s3_path)
     else:
         raise ValueError(f"Unsupported format: {args.format}")
