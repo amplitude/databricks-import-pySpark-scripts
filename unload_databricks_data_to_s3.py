@@ -117,7 +117,7 @@ if __name__ == '__main__':
                         default='none',
                         help="Partitioning strategy: none (default), repartition (split based on max_records_per_file), coalesce (future use)")
     parser.add_argument("--max_records_per_file",
-                        help="max records per output file (only used if --partitioned is set)",
+                        help="max records per output file",
                         nargs='?',
                         type=int,
                         default=MAX_RECORDS_PER_OUTPUT_FILE,
@@ -170,6 +170,7 @@ if __name__ == '__main__':
         num_partitions = math.ceil(export_data.count() / args.max_records_per_file)
         writer = export_data.repartition(num_partitions).write.mode("overwrite")
     elif args.partitioning_strategy == 'coalesce':
+        # TODO - enable this for all partition strategy in future. Not doing that now just be safe.
         spark.conf.set("spark.sql.files.maxRecordsPerFile", args.max_records_per_file)
         # Calculate desired number of partitions to consolidate partitions to avoid small files
         num_partitions = math.ceil(export_data.count() / args.max_records_per_file)
