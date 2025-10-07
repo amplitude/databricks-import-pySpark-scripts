@@ -7,6 +7,11 @@ from pyspark.sql import SparkSession
 from pyspark.sql import DataFrame
 from pyspark.sql.functions import col
 
+# cargo ingestion is impacted when the file size is greater than 2GB, because
+# the ingested files need to be broken down into smaller files by chopper
+# this value was adjusted from 1M down to 100K for the Zillow POC (2025-08-14)
+# to try to get Zillow files under 2GB each
+MAX_RECORDS_PER_OUTPUT_FILE: int = 100_000
 
 def parse_table_versions_map_arg(table_versions_map: str) -> dict[str, list[int]]:
     """
@@ -112,11 +117,11 @@ if __name__ == '__main__':
                         default='none',
                         help="Partitioning strategy: none (default), repartition (split based on max_records_per_file), coalesce (future use)")
     parser.add_argument("--max_records_per_file",
-                        help="max records per output file (only with --partitioning-strategy: repartition, coalesce)",
+                        help="max records per output file",
                         nargs='?',
                         type=int,
-                        default=100000,
-                        const=100000)
+                        default=MAX_RECORDS_PER_OUTPUT_FILE,
+                        const=MAX_RECORDS_PER_OUTPUT_FILE)
     parser.add_argument("--format",
                         choices=['json', 'parquet'],
                         default='json',
@@ -134,6 +139,7 @@ if __name__ == '__main__':
     spark.conf.set("fs.s3a.secret.key", aws_secret_key)
     spark.conf.set("fs.s3a.session.token", aws_session_token)
     spark.conf.set("fs.s3a.endpoint", args.s3_endpoint)
+
 
     sql: str = dbutils.secrets.get(scope=args.secret_scope, key=args.secret_key_name_for_sql)
 
@@ -158,12 +164,17 @@ if __name__ == '__main__':
         raise ValueError(f"max_records_per_file must be greater than 0 when using partitioning strategy '{args.partitioning_strategy}', got {args.max_records_per_file}")
     
     # Apply partitioning strategy
+    # export data with conditional partitioning and format selection
     if args.partitioning_strategy == 'repartition':
         # Calculate number of partitions based on max records per file
         num_partitions = math.ceil(export_data.count() / args.max_records_per_file)
         writer = export_data.repartition(num_partitions).write.mode("overwrite")
     elif args.partitioning_strategy == 'coalesce':
-        raise NotImplementedError("Coalesce partitioning strategy is not yet implemented")
+        # TODO - enable this for all partition strategy in future. Not doing that now just be safe.
+        spark.conf.set("spark.sql.files.maxRecordsPerFile", args.max_records_per_file)
+        # Calculate desired number of partitions to consolidate partitions to avoid small files
+        num_partitions = math.ceil(export_data.count() / args.max_records_per_file)
+        writer = export_data.coalesce(num_partitions).write.mode("overwrite")
     else:  # default to 'none'
         # No repartitioning - current simple script behavior
         writer = export_data.write.mode("overwrite")
