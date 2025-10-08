@@ -225,6 +225,23 @@ if __name__ == '__main__':
         # replace table name in sql to get prepared for sql transformation
         sql = sql.replace(table, view_name)
 
+    # Enable Adaptive Query Execution (AQE) for coalesce strategy to optimize partitioning while reading data. This should speed
+    # up the final coalesce operation during the write step.
+    if args.partitioning_strategy == 'coalesce':
+        # Group small source files together during the initial read to prevent creating thousands of tiny partitions.
+        # Instead of creating one partition for a small number of source files, Spark combines files until each
+        # partition reaches ~128MB, reducing partition count.
+        spark.conf.set("spark.sql.files.maxPartitionBytes", "128MB")
+        
+        # Enable Adaptive Query Execution to allow Spark to dynamically optimize the query plan based on
+        # runtime statistics rather than static estimates. This enables the coalescePartitions optimization below.
+        spark.conf.set("spark.sql.adaptive.enabled", "true")
+        
+        # Automatically merge small partitions after shuffle operations to maintain efficient partition sizes.
+        # This ensures that even if the query creates uneven partitions, they'll be consolidated before writing,
+        # preventing the creation of many small output files.
+        spark.conf.set("spark.sql.adaptive.coalescePartitions.enabled", "true")
+
     # run SQL to transform data
     export_data: DataFrame = spark.sql(sql)
 
