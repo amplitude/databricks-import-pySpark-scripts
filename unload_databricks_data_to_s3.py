@@ -2,6 +2,7 @@ import argparse
 import collections
 import math
 import time
+import logging
 
 from pyspark.sql import SparkSession
 from pyspark.sql import DataFrame, Column
@@ -147,6 +148,24 @@ def get_partition_count(event_count: int, max_event_count_per_output_file: int) 
     return max(1, math.ceil(event_count / max_event_count_per_output_file))
 
 
+def calculate_num_partitions(df: DataFrame, max_records_per_file: int, logger: logging.Logger) -> int:
+    """
+    Calculate the number of partitions needed based on DataFrame record count and max records per file.
+    Logs the count time and partition calculation.
+    
+    :param df: DataFrame to count
+    :param max_records_per_file: Maximum records per output file
+    :param logger: Logger instance for output
+    :return: Number of partitions needed
+    """
+    count_start = time.time()
+    record_count = df.count()
+    count_time = time.time() - count_start
+    num_partitions = math.ceil(record_count / max_records_per_file)
+    logger.info(f"DataFrame count: {record_count:,} records (took {count_time:.2f}s), calculated target partitions: {num_partitions}")
+    return num_partitions
+
+
 def export_meta_data(event_count: int, partition_count: int):
     meta_data: list = [{'event_count': event_count, 'partition_count': partition_count}]
     spark.createDataFrame(meta_data).write.mode("overwrite").json(args.s3_path + "/meta")
@@ -198,6 +217,17 @@ if __name__ == '__main__':
 
     args, unknown = parser.parse_known_args()
 
+    # Configure logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s [%(levelname)s] %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    logger = logging.getLogger(__name__)
+    
+    start_time = time.time()
+    logger.info("Starting Databricks unload job")
+
     spark = SparkSession.builder.getOrCreate()
     # setup s3 credentials for data export
     aws_access_key = dbutils.secrets.get(scope=args.secret_scope, key=args.secret_key_name_for_aws_access_key)
@@ -228,6 +258,7 @@ if __name__ == '__main__':
     # Enable Adaptive Query Execution (AQE) for coalesce strategy to optimize partitioning while reading data. This should speed
     # up the final coalesce operation during the write step.
     if args.partitioning_strategy == 'coalesce':
+        logger.info("Configuring Adaptive Query Execution (AQE) for coalesce strategy")
         # Group small source files together during the initial read to prevent creating thousands of tiny partitions.
         # Instead of creating one partition for a small number of source files, Spark combines files until each
         # partition reaches ~128MB, reducing partition count.
@@ -241,9 +272,14 @@ if __name__ == '__main__':
         # This ensures that even if the query creates uneven partitions, they'll be consolidated before writing,
         # preventing the creation of many small output files.
         spark.conf.set("spark.sql.adaptive.coalescePartitions.enabled", "true")
+        logger.info("AQE configuration complete")
 
     # run SQL to transform data
+    logger.info("Executing SQL transformation to create DataFrame")
+    df_creation_start = time.time()
     export_data: DataFrame = spark.sql(sql)
+    df_creation_time = time.time() - df_creation_start
+    logger.info(f"DataFrame created in {df_creation_time:.2f} seconds")
 
     # Validate max_records_per_file for any partitioning strategy
     if args.partitioning_strategy != 'none' and args.max_records_per_file <= 0:
@@ -252,19 +288,32 @@ if __name__ == '__main__':
     # Apply partitioning strategy
     # export data with conditional partitioning and format selection
     if args.partitioning_strategy == 'repartition':
-        # Calculate number of partitions based on max records per file
-        num_partitions = math.ceil(export_data.count() / args.max_records_per_file)
+        logger.info(f"Applying repartition strategy with max_records_per_file={args.max_records_per_file}")
+        num_partitions = calculate_num_partitions(export_data, args.max_records_per_file, logger)
+        
+        repartition_start = time.time()
         export_data = export_data.repartition(num_partitions)
+        repartition_time = time.time() - repartition_start
+        logger.info(f"Repartition complete in {repartition_time:.2f} seconds")
     elif args.partitioning_strategy == 'coalesce':
+        logger.info(f"Applying coalesce strategy with max_records_per_file={args.max_records_per_file}")
         # TODO - enable this for all partition strategy in future. Not doing that now just be safe.
         spark.conf.set("spark.sql.files.maxRecordsPerFile", args.max_records_per_file)
+        
         # Calculate desired number of partitions to consolidate partitions to avoid small files
-        num_partitions = math.ceil(export_data.count() / args.max_records_per_file)
+        num_partitions = calculate_num_partitions(export_data, args.max_records_per_file, logger)
+        
+        coalesce_start = time.time()
         export_data = export_data.coalesce(num_partitions)
+        coalesce_time = time.time() - coalesce_start
+        logger.info(f"Coalesce complete in {coalesce_time:.2f} seconds")
     else:  # default to 'none'
-        pass
+        logger.info("No partitioning strategy specified - writing with existing partition structure")
 
     # Write in requested format
+    logger.info(f"Writing data to {args.s3_path} in {args.format} format")
+    write_start = time.time()
+    
     if args.format == 'json':
         export_data.write.mode("overwrite").json(args.s3_path)
     elif args.format == 'parquet':
@@ -272,3 +321,9 @@ if __name__ == '__main__':
         export_data.write.mode("overwrite").option("compression", "zstd").option("compressionLevel", 3).parquet(args.s3_path)
     else:
         raise ValueError(f"Unsupported format: {args.format}")
+    
+    write_time = time.time() - write_start
+    total_time = time.time() - start_time
+    logger.info(f"Write complete in {write_time:.2f} seconds")
+    logger.info(f"Total job time: {total_time:.2f} seconds ({total_time/60:.2f} minutes)")
+    logger.info("Databricks unload job completed successfully")
