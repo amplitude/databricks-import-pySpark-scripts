@@ -297,16 +297,22 @@ if __name__ == '__main__':
         logger.info(f"Repartition complete in {repartition_time:.2f} seconds")
     elif args.partitioning_strategy == 'coalesce':
         logger.info(f"Applying coalesce strategy with max_records_per_file={args.max_records_per_file}")
+        
         # TODO - enable this for all partition strategy in future. Not doing that now just be safe.
         spark.conf.set("spark.sql.files.maxRecordsPerFile", args.max_records_per_file)
         
         # Calculate desired number of partitions to consolidate partitions to avoid small files
         num_partitions = calculate_num_partitions(export_data, args.max_records_per_file, logger)
         
+        current_partitions = export_data.rdd.getNumPartitions()
+        logger.info(f"Current number of partitions (after AQE optimization): {current_partitions}")
+        
         coalesce_start = time.time()
         export_data = export_data.coalesce(num_partitions)
         coalesce_time = time.time() - coalesce_start
-        logger.info(f"Coalesce complete in {coalesce_time:.2f} seconds")
+        
+        final_partitions = export_data.rdd.getNumPartitions()
+        logger.info(f"Coalesce complete in {coalesce_time:.2f} seconds: {current_partitions} → {final_partitions} partitions")
     else:  # default to 'none'
         logger.info("No partitioning strategy specified - writing with existing partition structure")
 
