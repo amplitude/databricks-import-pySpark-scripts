@@ -277,11 +277,8 @@ if __name__ == '__main__':
         log_info("AQE configuration complete")
 
     # run SQL to transform data
-    log_info("Executing SQL transformation to create DataFrame")
-    df_creation_start = time.time()
+    log_info("Creating DataFrame with SQL transformation (execution deferred)")
     export_data: DataFrame = spark.sql(sql)
-    df_creation_time = time.time() - df_creation_start
-    log_info(f"DataFrame created in {df_creation_time:.2f} seconds")
 
     # Validate max_records_per_file for any partitioning strategy
     if args.partitioning_strategy != 'none' and args.max_records_per_file <= 0:
@@ -293,33 +290,34 @@ if __name__ == '__main__':
         log_info(f"Applying repartition strategy with max_records_per_file={args.max_records_per_file}")
         num_partitions = calculate_num_partitions(export_data, args.max_records_per_file)
         
-        repartition_start = time.time()
+        # Add repartition to execution plan (will be applied during write with full shuffle)
+        log_info(f"Planning repartition to {num_partitions} partitions (will execute during write)")
         export_data = export_data.repartition(num_partitions)
-        repartition_time = time.time() - repartition_start
-        log_info(f"Repartition complete in {repartition_time:.2f} seconds")
     elif args.partitioning_strategy == 'coalesce':
         log_info(f"Applying coalesce strategy with max_records_per_file={args.max_records_per_file}")
         
         # TODO - enable this for all partition strategy in future. Not doing that now just be safe.
         spark.conf.set("spark.sql.files.maxRecordsPerFile", args.max_records_per_file)
         
-        # Calculate desired number of partitions to consolidate partitions to avoid small files
+        # Mark DataFrame for caching BEFORE the count operation so the results are cached
+        log_info("Marking DataFrame for caching before count operation")
+        export_data = export_data.cache()
+        
+        # Calculate desired number of partitions - the count() inside will execute the query
+        # and cache the results since we've marked the DataFrame for caching above
         num_partitions = calculate_num_partitions(export_data, args.max_records_per_file)
         
         current_partitions = export_data.rdd.getNumPartitions()
-        log_info(f"Current number of partitions (after AQE optimization): {current_partitions}")
         
-        coalesce_start = time.time()
+        # Add coalesce to execution plan (will be applied during write)
+        log_info(f"Planning coalesce: {current_partitions} → {num_partitions} partitions (will execute during write)")
         export_data = export_data.coalesce(num_partitions)
-        coalesce_time = time.time() - coalesce_start
-        
-        final_partitions = export_data.rdd.getNumPartitions()
-        log_info(f"Coalesce complete in {coalesce_time:.2f} seconds: {current_partitions} → {final_partitions} partitions")
     else:  # default to 'none'
         log_info("No partitioning strategy specified - writing with existing partition structure")
 
     # Write in requested format
-    log_info(f"Writing data to {args.s3_path} in {args.format} format")
+    log_info(f"Starting write operation to {args.s3_path} in {args.format} format")
+    log_info("This action will execute all deferred operations after count: read → filter → transform → repartition/coalesce → write")
     write_start = time.time()
     
     if args.format == 'json':
@@ -331,6 +329,12 @@ if __name__ == '__main__':
         raise ValueError(f"Unsupported format: {args.format}")
     
     write_time = time.time() - write_start
+    
+    # Clean up cached data to free memory (only if using coalesce strategy which caches)
+    if args.partitioning_strategy == 'coalesce':
+        log_info("Releasing cached DataFrame from memory")
+        export_data.unpersist()
+    
     total_time = time.time() - start_time
     log_info(f"Write complete in {write_time:.2f} seconds")
     log_info(f"Total job time: {total_time:.2f} seconds ({total_time/60:.2f} minutes)")
