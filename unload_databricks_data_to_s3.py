@@ -159,20 +159,32 @@ def get_partition_count(event_count: int, max_event_count_per_output_file: int) 
     return max(1, math.ceil(event_count / max_event_count_per_output_file))
 
 
-def calculate_num_partitions(df: DataFrame, max_records_per_file: int) -> int:
+def calculate_num_partitions(df: DataFrame, max_records_per_file: int, target_partitions: int = None) -> int:
     """
     Calculate the number of partitions needed based on DataFrame record count and max records per file.
+    Optionally uses target_partitions (derived from cluster size) to optimize parallelism.
     Logs the count time and partition calculation.
     
     :param df: DataFrame to count
     :param max_records_per_file: Maximum records per output file
+    :param target_partitions: Target partition count from cluster config (optional, pre-calculated as maxNodes * multiplier)
     :return: Number of partitions needed (minimum 1)
     """
     count_start = time.time()
     record_count = df.count()
     count_time = time.time() - count_start
-    num_partitions = max(1, math.ceil(record_count / max_records_per_file))
-    log_info(f"DataFrame count: {record_count:,} records (took {count_time:.2f}s), calculated target partitions: {num_partitions}")
+    log_info(f"DataFrame count: {record_count:,} records (took {count_time:.2f}s)")
+    
+    calculated_partitions = math.ceil(record_count / max_records_per_file)
+    
+    # If target_partitions is provided, use the maximum of calculated and target partitions
+    if target_partitions is not None:
+        num_partitions = max(1, calculated_partitions, target_partitions)
+        log_info(f"Partition sizing: calculated={calculated_partitions} (from record count), target from cluster={target_partitions}, using={num_partitions}")
+    else:
+        num_partitions = max(1, calculated_partitions)
+        log_info(f"Partition sizing: using {num_partitions} partitions (from record count)")
+    
     return num_partitions
 
 
@@ -224,6 +236,11 @@ if __name__ == '__main__':
                         choices=['json', 'parquet'],
                         default='json',
                         help="Output format: json (uncompressed) or parquet (zstd level 3)")
+    parser.add_argument("--target_partitions",
+                        help="Target number of partitions based on cluster size (optional, calculated as maxNodes * multiplier)",
+                        nargs='?',
+                        type=int,
+                        default=None)
 
     args, unknown = parser.parse_known_args()
 
@@ -288,7 +305,7 @@ if __name__ == '__main__':
     # export data with conditional partitioning and format selection
     if args.partitioning_strategy == 'repartition':
         log_info(f"Applying repartition strategy with max_records_per_file={args.max_records_per_file}")
-        num_partitions = calculate_num_partitions(export_data, args.max_records_per_file)
+        num_partitions = calculate_num_partitions(export_data, args.max_records_per_file, args.target_partitions)
         
         # Add repartition to execution plan (will be applied during write with full shuffle)
         log_info(f"Planning repartition to {num_partitions} partitions (will execute during write)")
@@ -303,9 +320,13 @@ if __name__ == '__main__':
         log_info("Marking DataFrame for caching before count operation")
         export_data = export_data.cache()
         
+        # Store reference to cached DataFrame so we can unpersist it later
+        # (coalesce() returns a new DataFrame, so we'd lose the reference otherwise)
+        cached_df = export_data
+        
         # Calculate desired number of partitions - the count() inside will execute the query
         # and cache the results since we've marked the DataFrame for caching above
-        num_partitions = calculate_num_partitions(export_data, args.max_records_per_file)
+        num_partitions = calculate_num_partitions(export_data, args.max_records_per_file, args.target_partitions)
         
         current_partitions = export_data.rdd.getNumPartitions()
         
@@ -333,7 +354,7 @@ if __name__ == '__main__':
     # Clean up cached data to free memory (only if using coalesce strategy which caches)
     if args.partitioning_strategy == 'coalesce':
         log_info("Releasing cached DataFrame from memory")
-        export_data.unpersist()
+        cached_df.unpersist()
     
     total_time = time.time() - start_time
     log_info(f"Write complete in {write_time:.2f} seconds")
