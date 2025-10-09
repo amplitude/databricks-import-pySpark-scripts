@@ -166,12 +166,12 @@ def calculate_num_partitions(df: DataFrame, max_records_per_file: int) -> int:
     
     :param df: DataFrame to count
     :param max_records_per_file: Maximum records per output file
-    :return: Number of partitions needed
+    :return: Number of partitions needed (minimum 1)
     """
     count_start = time.time()
     record_count = df.count()
     count_time = time.time() - count_start
-    num_partitions = math.ceil(record_count / max_records_per_file)
+    num_partitions = max(1, math.ceil(record_count / max_records_per_file))
     log_info(f"DataFrame count: {record_count:,} records (took {count_time:.2f}s), calculated target partitions: {num_partitions}")
     return num_partitions
 
