@@ -170,18 +170,19 @@ def calculate_num_partitions(df: DataFrame, max_records_per_file: int, target_pa
     :param target_partitions: Target partition count from cluster config (optional, pre-calculated as maxNodes * multiplier)
     :return: Number of partitions needed (minimum 1)
     """
-    count_start = time.time()
-    record_count = df.count()
-    count_time = time.time() - count_start
-    log_info(f"DataFrame count: {record_count:,} records (took {count_time:.2f}s)")
-    
-    calculated_partitions = math.ceil(record_count / max_records_per_file)
-    
-    # If target_partitions is provided, use the maximum of calculated and target partitions
+    # TODO: Add unit tests for partition calculation logic with various target_partitions values
     if target_partitions is not None:
-        num_partitions = max(1, calculated_partitions, target_partitions)
-        log_info(f"Partition sizing: calculated={calculated_partitions} (from record count), target from cluster={target_partitions}, using={num_partitions}")
+        # Use target_partitions directly for full control during testing/rollout
+        # Once we understand performance impact, we may revert to max(calculated, target)
+        num_partitions = max(1, target_partitions)
+        log_info(f"Partition sizing: using target from cluster={num_partitions}")
     else:
+        count_start = time.time()
+        record_count = df.count()
+        count_time = time.time() - count_start
+        log_info(f"DataFrame count: {record_count:,} records (took {count_time:.2f}s)")
+        
+        calculated_partitions = math.ceil(record_count / max_records_per_file)
         num_partitions = max(1, calculated_partitions)
         log_info(f"Partition sizing: using {num_partitions} partitions (from record count)")
     
@@ -316,16 +317,7 @@ if __name__ == '__main__':
         # TODO - enable this for all partition strategy in future. Not doing that now just be safe.
         spark.conf.set("spark.sql.files.maxRecordsPerFile", args.max_records_per_file)
         
-        # Mark DataFrame for caching BEFORE the count operation so the results are cached
-        log_info("Marking DataFrame for caching before count operation")
-        export_data = export_data.cache()
-        
-        # Store reference to cached DataFrame so we can unpersist it later
-        # (coalesce() returns a new DataFrame, so we'd lose the reference otherwise)
-        cached_df = export_data
-        
-        # Calculate desired number of partitions - the count() inside will execute the query
-        # and cache the results since we've marked the DataFrame for caching above
+        # Calculate desired number of partitions
         num_partitions = calculate_num_partitions(export_data, args.max_records_per_file, args.target_partitions)
         
         current_partitions = export_data.rdd.getNumPartitions()
@@ -338,7 +330,7 @@ if __name__ == '__main__':
 
     # Write in requested format
     log_info(f"Starting write operation to {args.s3_path} in {args.format} format")
-    log_info("This action will execute all deferred operations after count: read → filter → transform → repartition/coalesce → write")
+    log_info("This action will execute all deferred operations: read → filter → transform → repartition/coalesce → write")
     write_start = time.time()
     
     if args.format == 'json':
@@ -350,11 +342,6 @@ if __name__ == '__main__':
         raise ValueError(f"Unsupported format: {args.format}")
     
     write_time = time.time() - write_start
-    
-    # Clean up cached data to free memory (only if using coalesce strategy which caches)
-    if args.partitioning_strategy == 'coalesce':
-        log_info("Releasing cached DataFrame from memory")
-        cached_df.unpersist()
     
     total_time = time.time() - start_time
     log_info(f"Write complete in {write_time:.2f} seconds")
