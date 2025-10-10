@@ -159,20 +159,33 @@ def get_partition_count(event_count: int, max_event_count_per_output_file: int) 
     return max(1, math.ceil(event_count / max_event_count_per_output_file))
 
 
-def calculate_num_partitions(df: DataFrame, max_records_per_file: int) -> int:
+def calculate_num_partitions(df: DataFrame, max_records_per_file: int, target_partitions: int = None) -> int:
     """
     Calculate the number of partitions needed based on DataFrame record count and max records per file.
+    Optionally uses target_partitions (derived from cluster size) to optimize parallelism.
     Logs the count time and partition calculation.
     
     :param df: DataFrame to count
     :param max_records_per_file: Maximum records per output file
+    :param target_partitions: Target partition count from cluster config (optional, pre-calculated as maxNodes * multiplier)
     :return: Number of partitions needed (minimum 1)
     """
-    count_start = time.time()
-    record_count = df.count()
-    count_time = time.time() - count_start
-    num_partitions = max(1, math.ceil(record_count / max_records_per_file))
-    log_info(f"DataFrame count: {record_count:,} records (took {count_time:.2f}s), calculated target partitions: {num_partitions}")
+    # TODO: Add unit tests for partition calculation logic with various target_partitions values
+    if target_partitions is not None:
+        # Use target_partitions directly for full control during testing/rollout
+        # Once we understand performance impact, we may revert to max(calculated, target)
+        num_partitions = max(1, target_partitions)
+        log_info(f"Partition sizing: using target from cluster={num_partitions}")
+    else:
+        count_start = time.time()
+        record_count = df.count()
+        count_time = time.time() - count_start
+        log_info(f"DataFrame count: {record_count:,} records (took {count_time:.2f}s)")
+        
+        calculated_partitions = math.ceil(record_count / max_records_per_file)
+        num_partitions = max(1, calculated_partitions)
+        log_info(f"Partition sizing: using {num_partitions} partitions (from record count)")
+    
     return num_partitions
 
 
@@ -224,6 +237,11 @@ if __name__ == '__main__':
                         choices=['json', 'parquet'],
                         default='json',
                         help="Output format: json (uncompressed) or parquet (zstd level 3)")
+    parser.add_argument("--target_partitions",
+                        help="Target number of partitions based on cluster size (optional, calculated as maxNodes * multiplier)",
+                        nargs='?',
+                        type=int,
+                        default=None)
 
     args, unknown = parser.parse_known_args()
 
@@ -277,11 +295,8 @@ if __name__ == '__main__':
         log_info("AQE configuration complete")
 
     # run SQL to transform data
-    log_info("Executing SQL transformation to create DataFrame")
-    df_creation_start = time.time()
+    log_info("Creating DataFrame with SQL transformation (execution deferred)")
     export_data: DataFrame = spark.sql(sql)
-    df_creation_time = time.time() - df_creation_start
-    log_info(f"DataFrame created in {df_creation_time:.2f} seconds")
 
     # Validate max_records_per_file for any partitioning strategy
     if args.partitioning_strategy != 'none' and args.max_records_per_file <= 0:
@@ -291,35 +306,31 @@ if __name__ == '__main__':
     # export data with conditional partitioning and format selection
     if args.partitioning_strategy == 'repartition':
         log_info(f"Applying repartition strategy with max_records_per_file={args.max_records_per_file}")
-        num_partitions = calculate_num_partitions(export_data, args.max_records_per_file)
+        num_partitions = calculate_num_partitions(export_data, args.max_records_per_file, args.target_partitions)
         
-        repartition_start = time.time()
+        # Add repartition to execution plan (will be applied during write with full shuffle)
+        log_info(f"Planning repartition to {num_partitions} partitions (will execute during write)")
         export_data = export_data.repartition(num_partitions)
-        repartition_time = time.time() - repartition_start
-        log_info(f"Repartition complete in {repartition_time:.2f} seconds")
     elif args.partitioning_strategy == 'coalesce':
         log_info(f"Applying coalesce strategy with max_records_per_file={args.max_records_per_file}")
         
         # TODO - enable this for all partition strategy in future. Not doing that now just be safe.
         spark.conf.set("spark.sql.files.maxRecordsPerFile", args.max_records_per_file)
         
-        # Calculate desired number of partitions to consolidate partitions to avoid small files
-        num_partitions = calculate_num_partitions(export_data, args.max_records_per_file)
+        # Calculate desired number of partitions
+        num_partitions = calculate_num_partitions(export_data, args.max_records_per_file, args.target_partitions)
         
         current_partitions = export_data.rdd.getNumPartitions()
-        log_info(f"Current number of partitions (after AQE optimization): {current_partitions}")
         
-        coalesce_start = time.time()
+        # Add coalesce to execution plan (will be applied during write)
+        log_info(f"Planning coalesce: {current_partitions} → {num_partitions} partitions (will execute during write)")
         export_data = export_data.coalesce(num_partitions)
-        coalesce_time = time.time() - coalesce_start
-        
-        final_partitions = export_data.rdd.getNumPartitions()
-        log_info(f"Coalesce complete in {coalesce_time:.2f} seconds: {current_partitions} → {final_partitions} partitions")
     else:  # default to 'none'
         log_info("No partitioning strategy specified - writing with existing partition structure")
 
     # Write in requested format
-    log_info(f"Writing data to {args.s3_path} in {args.format} format")
+    log_info(f"Starting write operation to {args.s3_path} in {args.format} format")
+    log_info("This action will execute all deferred operations: read → filter → transform → repartition/coalesce → write")
     write_start = time.time()
     
     if args.format == 'json':
@@ -331,6 +342,7 @@ if __name__ == '__main__':
         raise ValueError(f"Unsupported format: {args.format}")
     
     write_time = time.time() - write_start
+    
     total_time = time.time() - start_time
     log_info(f"Write complete in {write_time:.2f} seconds")
     log_info(f"Total job time: {total_time:.2f} seconds ({total_time/60:.2f} minutes)")
