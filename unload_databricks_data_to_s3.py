@@ -301,10 +301,8 @@ if __name__ == '__main__':
         # Calculate desired number of partitions
         num_partitions = calculate_num_partitions(export_data, args.max_records_per_file, args.target_partitions)
         
-        current_partitions = export_data.rdd.getNumPartitions()
-        
         # Add coalesce to execution plan (will be applied during write)
-        log_info(f"Planning coalesce: {current_partitions} → {num_partitions} partitions (will execute during write)")
+        log_info(f"Planning coalesce to {num_partitions} partitions (will execute during write)")
         export_data = export_data.coalesce(num_partitions)
     else:  # default to 'none'
         log_info("No partitioning strategy specified - writing with existing partition structure")
