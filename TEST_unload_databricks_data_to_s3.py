@@ -7,8 +7,11 @@ print("Using the test unload script. THIS IS MEANT FOR TESTING ONLY. IT IS NOT F
 
 import argparse
 import collections
+import json
 import math
+import uuid
 import time
+from typing import Optional
 from datetime import datetime
 
 from pyspark.sql import SparkSession
@@ -25,6 +28,11 @@ from pyspark.sql.types import (
 # to try to get Zillow files under 2GB each
 MAX_RECORDS_PER_OUTPUT_FILE: int = 100_000
 
+MISSING_CDF_FILE_ERROR_SIGNATURE = "DELTA_CHANGE_DATA_FILE_NOT_FOUND"
+SPARK_DBR_FILE_NOT_EXIST_SIGNATURE = "FAILED_READ_FILE.DBR_FILE_NOT_EXIST"
+
+LOG_MESSAGES: list[str] = []
+
 
 def log_info(message: str) -> None:
     """
@@ -34,7 +42,34 @@ def log_info(message: str) -> None:
     :param message: Message to log
     """
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    print(f"{timestamp} [INFO] {message}")
+    log_message = f"{timestamp} [INFO] {message}"
+    print(log_message)
+    LOG_MESSAGES.append(log_message)
+
+
+def get_databricks_run_id() -> str:
+    try:
+        task_context = dbutils.jobs.taskContext()
+        if task_context is not None:
+            run_id = task_context.taskRunId()
+            if run_id:
+                return str(run_id)
+    except Exception as exc:  # pylint: disable=broad-except
+        log_info(f"Failed to retrieve run ID from dbutils: {exc}")
+
+    fallback_id = str(uuid.uuid1())
+    log_info(f"Generated fallback run ID: {fallback_id}")
+    return fallback_id
+
+def extract_missing_cdf_error_signature(error: Exception) -> Optional[str]:
+    message = str(error) if error else ""
+    if not message:
+        return None
+    if MISSING_CDF_FILE_ERROR_SIGNATURE in message:
+        return MISSING_CDF_FILE_ERROR_SIGNATURE
+    if SPARK_DBR_FILE_NOT_EXIST_SIGNATURE in message:
+        return SPARK_DBR_FILE_NOT_EXIST_SIGNATURE
+    return None
 
 def _drop_nulltype_fields(col: Column, dtype: DataType) -> Column:
     """
@@ -271,11 +306,41 @@ if __name__ == '__main__':
 
     # Build temp views
     table_to_import_version_range_map: dict[str, list[int]] = parse_table_versions_map_arg(args.table_versions_map)
+    run_id = get_databricks_run_id()
+    log_info(f"Databricks run ID: {run_id}")
+    table_results: dict[str, dict[str, object]] = {}
+
     for table, import_version_range in table_to_import_version_range_map.items():
-        log_info(f"Processing table: {table}, version range: {import_version_range[0]}-{import_version_range[1]}")
-        
-        data: DataFrame = fetch_data(table, import_version_range[0], import_version_range[1])
-        
+        starting_version = import_version_range[0]
+        ending_version = import_version_range[1]
+        log_info(f"Processing table: {table}, version range: {starting_version}-{ending_version}")
+        table_result = {
+            "initialStartVersion": import_version_range[0],
+            "initialEndVersion": import_version_range[1],
+            "initialFetchError": None,
+            "finalStartVersion": import_version_range[0],
+            "finalEndVersion": import_version_range[1],
+        }
+        table_results[table] = table_result
+
+        try:
+            data: DataFrame = fetch_data(table, starting_version, ending_version)
+        except Exception as fetch_error:
+            fallback_signature = extract_missing_cdf_error_signature(fetch_error)
+            if fallback_signature is None:
+                raise
+
+            log_info(
+                f"Encountered missing CDF files for {table} (signature={fallback_signature}). "
+                f"Skipping versions {table_result['initialStartVersion']}-{table_result['initialEndVersion'] - 1} and re-reading at last known good version {ending_version}."
+            )
+            table_result["initialFetchError"] = str(fetch_error)
+            table_result["finalStartVersion"] = ending_version
+            table_result["finalEndVersion"] = ending_version
+
+            data = fetch_data(table, ending_version, ending_version)
+            log_info(f"Successfully read {table} at version {ending_version}.")
+
         # Count after fetch
         try:
             fetch_count = data.count()
@@ -491,4 +556,12 @@ if __name__ == '__main__':
     log_info("  STAGE 4: PARTITION - After repartition/coalesce (if applied)")
     log_info("  STAGE 5: WRITE - Final write to S3")
     log_info("="*80)
-    log_info("Databricks unload job completed successfully")
+    log_info("Databricks unload completed successfully")
+
+    logs_base = args.s3_path.rstrip("/") + f"/logs/run_{run_id}"
+    log_info(f"Writing logs to {logs_base}")
+    
+    table_results_path = logs_base + "/table_results.json"
+    logs_path = logs_base + "/logs.txt"
+    dbutils.fs.put(table_results_path, json.dumps({"tables": table_results}, indent=2), overwrite=True)
+    dbutils.fs.put(logs_path, "\n".join(LOG_MESSAGES), overwrite=True)
