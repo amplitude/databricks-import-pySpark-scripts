@@ -101,19 +101,23 @@ def get_databricks_run_id() -> str:
     except Exception as exc:
         log_info(f"Failed to retrieve run ID from DB_JOB_RUN_ID: {exc}")
     
-    # Method 5: Try safeToJson() attributes
+    # Method 5: Try safeToJson() attributes - currentRunId is a direct string attribute
     try:
         context_json = dbutils.notebook.entry_point.getDbutils().notebook().getContext().safeToJson()
         context = json.loads(context_json)
         
-        # Check attributes for run ID
+        # Check attributes for run ID - currentRunId is a string attribute, not a nested object
         attributes = context.get('attributes', {})
-        run_id = attributes.get('runId') or attributes.get('jobRunId') or attributes.get('RunId')
-        if run_id:
-            log_info(f"Retrieved run ID from safeToJson() attributes: {run_id}")
-            return str(run_id)
-        else:
-            log_info(f"WARNING: runId not found in safeToJson(). Available attributes: {list(attributes.keys())}")
+        
+        # Try each attribute and log which one works
+        for attr_name in ['currentRunId', 'rootRunId', 'runId', 'jobRunId', 'RunId']:
+            run_id = attributes.get(attr_name)
+            if run_id:
+                log_info(f"Retrieved run ID from safeToJson() attributes['{attr_name}']: {run_id}")
+                return str(run_id)
+        
+        # If none found, log available attributes
+        log_info(f"WARNING: runId not found in safeToJson(). Available attributes: {list(attributes.keys())}")
     except Exception as exc:
         log_info(f"Failed to retrieve run ID from safeToJson(): {exc}")
     
