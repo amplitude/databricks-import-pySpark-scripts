@@ -53,31 +53,34 @@ def get_databricks_run_id() -> str:
     This script is always executed as a SparkPythonTask, never as a notebook.
     Falls back to UUID if retrieval fails.
     
-    Reference: https://community.databricks.com/t5/data-engineering/is-it-possible-to-get-job-run-id-of-notebook-run-by-dbutils/td-p/29220
+    Uses safeToJson() which is whitelisted in shared access mode clusters.
+    Reference: https://kb.databricks.com/en_US/unity-catalog/pyjerror-when-using-the-tojson-method-in-standard-access-mode-compute
     """
-    # Method 1: Direct call to currentRunId() (most reliable for SparkPythonTask)
+    # Method 1: Try task context first (most direct approach)
     try:
-        run_id = dbutils.notebook.entry_point.getDbutils().notebook().getContext().currentRunId().toString()
-        if run_id:
-            log_info(f"Retrieved run ID from context.currentRunId(): {run_id}")
-            return str(run_id)
-    except Exception as exc:
-        log_info(f"Failed to retrieve run ID via currentRunId(): {exc}")
+        task_context = dbutils.jobs.taskContext()
+        if task_context is not None:
+            run_id = task_context.taskRunId()
+            if run_id:
+                log_info(f"Retrieved run ID from task context: {run_id}")
+                return str(run_id)
+    except Exception as exc:  # pylint: disable=broad-except
+        log_info(f"Failed to retrieve run ID from task context: {exc}")
     
-    # Method 2: Parse from JSON context (fallback)
+    # Method 2: Parse from safeToJson() context (whitelisted method)
     try:
-        context_json = dbutils.notebook.entry_point.getDbutils().notebook().getContext().toJson()
+        context_json = dbutils.notebook.entry_point.getDbutils().notebook().getContext().safeToJson()
         import json
         context = json.loads(context_json)
         
         run_id = (context.get('currentRunId') or {}).get('id')
         if run_id:
-            log_info(f"Retrieved run ID from context JSON: {run_id}")
+            log_info(f"Retrieved run ID from context.safeToJson(): {run_id}")
             return str(run_id)
         else:
             log_info(f"WARNING: currentRunId.id not found in context. Context keys: {list(context.keys())}")
     except Exception as exc:
-        log_info(f"Failed to retrieve run ID from context JSON: {exc}")
+        log_info(f"Failed to retrieve run ID from context.safeToJson(): {exc}")
     
     # Fallback: Generate UUID
     fallback_id = str(uuid.uuid1())
