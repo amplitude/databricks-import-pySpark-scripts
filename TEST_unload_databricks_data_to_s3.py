@@ -48,15 +48,41 @@ def log_info(message: str) -> None:
 
 
 def get_databricks_run_id() -> str:
+    """
+    Retrieve the Databricks job run ID for SparkPythonTask jobs.
+    This script is always executed as a SparkPythonTask, never as a notebook.
+    Falls back to UUID if retrieval fails.
+    
+    Uses safeToJson() which is whitelisted in shared access mode clusters.
+    Reference: https://kb.databricks.com/en_US/unity-catalog/pyjerror-when-using-the-tojson-method-in-standard-access-mode-compute
+    """
+    # Method 1: Try task context first (most direct approach)
     try:
         task_context = dbutils.jobs.taskContext()
         if task_context is not None:
             run_id = task_context.taskRunId()
             if run_id:
+                log_info(f"Retrieved run ID from task context: {run_id}")
                 return str(run_id)
     except Exception as exc:  # pylint: disable=broad-except
-        log_info(f"Failed to retrieve run ID from dbutils: {exc}")
-
+        log_info(f"Failed to retrieve run ID from task context: {exc}")
+    
+    # Method 2: Parse from safeToJson() context (whitelisted method)
+    try:
+        context_json = dbutils.notebook.entry_point.getDbutils().notebook().getContext().safeToJson()
+        import json
+        context = json.loads(context_json)
+        
+        run_id = (context.get('currentRunId') or {}).get('id')
+        if run_id:
+            log_info(f"Retrieved run ID from context.safeToJson(): {run_id}")
+            return str(run_id)
+        else:
+            log_info(f"WARNING: currentRunId.id not found in context. Context keys: {list(context.keys())}")
+    except Exception as exc:
+        log_info(f"Failed to retrieve run ID from context.safeToJson(): {exc}")
+    
+    # Fallback: Generate UUID
     fallback_id = str(uuid.uuid1())
     log_info(f"Generated fallback run ID: {fallback_id}")
     return fallback_id
