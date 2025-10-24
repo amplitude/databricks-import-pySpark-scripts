@@ -66,7 +66,7 @@ def get_databricks_run_id() -> str:
         run_id = attributes.get('multitaskParentRunId')
         
         if run_id:
-            log_info(f"Retrieved job run ID from safeToJson() attributes['multitaskParentRunId']: {run_id}")
+            log_info(f"Retrieved job run ID: {run_id}")
             return str(run_id)
         
         # If multitaskParentRunId not found, log available attributes and fall back to UUID
@@ -80,6 +80,11 @@ def get_databricks_run_id() -> str:
     return fallback_id
 
 def extract_missing_cdf_error_signature(error: Exception) -> Optional[str]:
+    """
+    Return a signature string if the exception message indicates a CDF-related missing file.
+    We match on the explicit CDF message, and also allow the Spark DBR file-not-exist signature
+    as a fallback
+    """
     message = str(error) if error else ""
     if not message:
         return None
@@ -263,9 +268,24 @@ def build_views_for_tables(
         table_results: dict[str, dict[str, object]],
         force_latest_only: bool = False) -> str:
     """
-    Build temp views for all tables. Optionally force latest-only reads (start=end=end_version) for all tables.
-    Updates table_results with initial/final versions and any initial fetch error strings.
-    Returns the transformed SQL with table names replaced by temp view names.
+    Build temp views for all tables and replace table names in the provided SQL with view names.
+
+    Rationale on error handling with Spark's lazy evaluation:
+    - We first try to catch errors at the per-table level to identify the offending table and
+      immediately flip ONLY that table to [end,end]. This helps attribution and minimizes skipping.
+      However, because Spark defers execution, some file-missing problems won't surface here.
+    - For those deferred failures, we also have a top-level catch (see caller) that retries
+      ALL tables in latest-only mode after a CDF signature is detected during the write.
+
+    Modes:
+    - Normal (force_latest_only=False):
+      Attempt each view with [start,end]; on a table-specific CDF error, fallback that table to [end,end]
+      and record the versions in table_results. Other tables keep their original range.
+
+    - Latest-only (force_latest_only=True):
+      Force every table to [end,end] and update table_results for each table.
+
+    Returns the transformed SQL with table identifiers replaced by temp view names.
     """
     sql_local = original_sql
     for table, import_version_range in table_to_import_version_range_map.items():
@@ -300,7 +320,10 @@ def build_views_for_tables(
             log_info(f"Forced latest-only read for {table} at version {ending_version}.")
             continue
 
-        # Default path with per-table fallback retained
+        # Default path with per-table fallback retained:
+        # Only the failing table is switched to [end,end]; others keep their original [start,end].
+        # Note: Missing-file errors may not trigger here due to lazy evaluation; those will be
+        # handled by the higher-level catch during the write phase.
         try:
             view_name = _fetch_and_create_view(starting_version, ending_version)
             sql_local = sql_local.replace(table, view_name)
@@ -334,7 +357,12 @@ def write_export_data_for_versions(
         force_latest_only: bool) -> None:
     """
     Build views for all tables (optionally forcing latest-only), create export DataFrame, apply
-    partitioning strategy, and perform the write. Any exception is propagated to caller.
+    partitioning strategy, and perform the write which TRIGGERS execution (lazy → materialized).
+
+    Error surfacing strategy with lazy execution:
+    - Exceptions often occur only at write time. We therefore propagate any exception to the caller,
+      which inspects the message for the CDF signature and, if present, retries the retrieval, transformation, 
+      and write in latest-only mode to recover. If the error is non-CDF, the caller re-raises.
     """
     sql_to_run = build_views_for_tables(
         original_sql=original_sql,
@@ -476,8 +504,8 @@ if __name__ == '__main__':
             # non-CDF error: re-raise immediately
             raise
         log_info(
-            f"Pipeline failed with CDF missing-file signature ({sig}). "
-            f"Retrying pipeline with latest-only (start=end=end_version) for all tables."
+            f"Failed with CDF missing-file signature ({sig}). "
+            f"Retrying with latest-only (start=end=end_version) for all tables."
         )
         # If we get a CDF error, retry with only the latest version for all tables any exception should propagate
         write_export_data_for_versions(
