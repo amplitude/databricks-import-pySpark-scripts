@@ -53,34 +53,69 @@ def get_databricks_run_id() -> str:
     This script is always executed as a SparkPythonTask, never as a notebook.
     Falls back to UUID if retrieval fails.
     
-    Uses safeToJson() which is whitelisted in shared access mode clusters.
-    Reference: https://kb.databricks.com/en_US/unity-catalog/pyjerror-when-using-the-tojson-method-in-standard-access-mode-compute
+    Tries multiple methods in order of reliability for shared access mode clusters.
     """
-    # Method 1: Try task context first (most direct approach)
-    try:
-        task_context = dbutils.jobs.taskContext()
-        if task_context is not None:
-            run_id = task_context.taskRunId()
-            if run_id:
-                log_info(f"Retrieved run ID from task context: {run_id}")
-                return str(run_id)
-    except Exception as exc:  # pylint: disable=broad-except
-        log_info(f"Failed to retrieve run ID from task context: {exc}")
+    import json
+    import os
     
-    # Method 2: Parse from safeToJson() context (whitelisted method)
+    # Method 1: Try Spark configuration (most reliable for job compute)
+    try:
+        run_id = spark.conf.get("spark.databricks.job.runId")
+        if run_id:
+            log_info(f"Retrieved run ID from Spark config: {run_id}")
+            return str(run_id)
+    except Exception as exc:
+        log_info(f"Failed to retrieve run ID from Spark config: {exc}")
+    
+    # Method 2: Try TaskContext local properties (works in shared access mode)
+    try:
+        from pyspark.taskcontext import TaskContext
+        tc = TaskContext.get()
+        if tc:
+            # Try to get run ID from cluster usage tags
+            tags_json = tc.getLocalProperty("spark.databricks.clusterUsageTags.clusterAllTags")
+            if tags_json:
+                tags = dict(item.values() for item in json.loads(tags_json))
+                run_id = tags.get('RunId') or tags.get('runId')
+                if run_id:
+                    log_info(f"Retrieved run ID from TaskContext cluster tags: {run_id}")
+                    return str(run_id)
+    except Exception as exc:
+        log_info(f"Failed to retrieve run ID from TaskContext: {exc}")
+    
+    # Method 3: Try environment variable DATABRICKS_RUN_ID
+    try:
+        run_id = os.getenv('DATABRICKS_RUN_ID')
+        if run_id:
+            log_info(f"Retrieved run ID from DATABRICKS_RUN_ID env var: {run_id}")
+            return str(run_id)
+    except Exception as exc:
+        log_info(f"Failed to retrieve run ID from DATABRICKS_RUN_ID: {exc}")
+    
+    # Method 4: Try environment variable DB_JOB_RUN_ID
+    try:
+        run_id = os.getenv('DB_JOB_RUN_ID')
+        if run_id:
+            log_info(f"Retrieved run ID from DB_JOB_RUN_ID env var: {run_id}")
+            return str(run_id)
+    except Exception as exc:
+        log_info(f"Failed to retrieve run ID from DB_JOB_RUN_ID: {exc}")
+    
+    # Method 5: Try safeToJson() attributes
     try:
         context_json = dbutils.notebook.entry_point.getDbutils().notebook().getContext().safeToJson()
-        import json
         context = json.loads(context_json)
         
-        run_id = (context.get('currentRunId') or {}).get('id')
+        # Check attributes for run ID
+        attributes = context.get('attributes', {})
+        run_id = attributes.get('runId') or attributes.get('jobRunId') or attributes.get('RunId')
         if run_id:
-            log_info(f"Retrieved run ID from context.safeToJson(): {run_id}")
+            log_info(f"Retrieved run ID from safeToJson() attributes: {run_id}")
             return str(run_id)
         else:
-            log_info(f"WARNING: currentRunId.id not found in context. Context keys: {list(context.keys())}")
+            log_info(f"WARNING: runId not found in safeToJson(). Available attributes: {list(attributes.keys())}")
     except Exception as exc:
-        log_info(f"Failed to retrieve run ID from context.safeToJson(): {exc}")
+        log_info(f"Failed to retrieve run ID from safeToJson(): {exc}")
     
     # Fallback: Generate UUID
     fallback_id = str(uuid.uuid1())
