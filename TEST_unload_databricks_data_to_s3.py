@@ -255,6 +255,138 @@ def export_meta_data(event_count: int, partition_count: int):
 
 
 
+def build_views_for_tables(
+        original_sql: str,
+        table_to_import_version_range_map: dict[str, list[int]],
+        data_type: str,
+        ingestion_in_mutability_mode: bool,
+        table_results: dict[str, dict[str, object]],
+        force_latest_only: bool = False) -> str:
+    """
+    Build temp views for all tables. Optionally force latest-only reads (start=end=end_version) for all tables.
+    Updates table_results with initial/final versions and any initial fetch error strings.
+    Returns the transformed SQL with table names replaced by temp view names.
+    """
+    sql_local = original_sql
+    for table, import_version_range in table_to_import_version_range_map.items():
+        starting_version = import_version_range[0]
+        ending_version = import_version_range[1]
+
+        if table not in table_results:
+            table_results[table] = {
+                "initialStartVersion": starting_version,
+                "initialEndVersion": ending_version,
+                "initialFetchError": None,
+                "finalStartVersion": starting_version,
+                "finalEndVersion": ending_version,
+            }
+
+        log_info(f"Processing table: {table}, version range: {starting_version}-{ending_version}")
+
+        def _fetch_and_create_view(start_v: int, end_v: int):
+            df = fetch_data(table, start_v, end_v)
+            if not ingestion_in_mutability_mode:
+                df = filter_data(df, data_type)
+            view_name: str = build_temp_view_name(table)
+            df.createOrReplaceTempView(view_name)
+            return view_name
+
+        if force_latest_only:
+            # Force start=end=end_version
+            table_results[table]["finalStartVersion"] = ending_version
+            table_results[table]["finalEndVersion"] = ending_version
+            view_name = _fetch_and_create_view(ending_version, ending_version)
+            sql_local = sql_local.replace(table, view_name)
+            log_info(f"Forced latest-only read for {table} at version {ending_version}.")
+            continue
+
+        # Default path with per-table fallback retained
+        try:
+            view_name = _fetch_and_create_view(starting_version, ending_version)
+            sql_local = sql_local.replace(table, view_name)
+        except Exception as fetch_error:
+            fallback_signature = extract_missing_cdf_error_signature(fetch_error)
+            if fallback_signature is None:
+                # propagate non-CDF errors
+                raise
+            log_info(
+                f"Encountered missing CDF files for {table} (signature={fallback_signature}). "
+                f"Skipping versions {table_results[table]['initialStartVersion']}-{table_results[table]['initialEndVersion'] - 1} and re-reading at last known good version {ending_version}."
+            )
+            table_results[table]["initialFetchError"] = str(fetch_error)
+            table_results[table]["finalStartVersion"] = ending_version
+            table_results[table]["finalEndVersion"] = ending_version
+
+            view_name = _fetch_and_create_view(ending_version, ending_version)
+            sql_local = sql_local.replace(table, view_name)
+            log_info(f"Successfully read {table} at version {ending_version}.")
+
+    return sql_local
+
+
+def write_export_data_for_versions(
+        original_sql: str,
+        table_to_import_version_range_map: dict[str, list[int]],
+        data_type: str,
+        ingestion_in_mutability_mode: bool,
+        table_results: dict[str, dict[str, object]],
+        args,
+        force_latest_only: bool) -> None:
+    """
+    Build views for all tables (optionally forcing latest-only), create export DataFrame, apply
+    partitioning strategy, and perform the write. Any exception is propagated to caller.
+    """
+    sql_to_run = build_views_for_tables(
+        original_sql=original_sql,
+        table_to_import_version_range_map=table_to_import_version_range_map,
+        data_type=data_type,
+        ingestion_in_mutability_mode=ingestion_in_mutability_mode,
+        table_results=table_results,
+        force_latest_only=force_latest_only,
+    )
+
+    # Create export DataFrame (deferred execution)
+    log_info("Creating DataFrame with SQL transformation (execution deferred)")
+    export_data: DataFrame = spark.sql(sql_to_run)
+
+    # Validate max_records_per_file for any partitioning strategy
+    if args.partitioning_strategy != 'none' and args.max_records_per_file <= 0:
+        raise ValueError(
+            f"max_records_per_file must be greater than 0 when using partitioning strategy '{args.partitioning_strategy}', "
+            f"got {args.max_records_per_file}")
+
+    # Apply partitioning strategy
+    if args.partitioning_strategy == 'repartition':
+        log_info(f"Applying repartition strategy with max_records_per_file={args.max_records_per_file}")
+        num_partitions = calculate_num_partitions(export_data, args.max_records_per_file, args.target_partitions)
+        log_info(f"Planning repartition to {num_partitions} partitions (will execute during write)")
+        export_data = export_data.repartition(num_partitions)
+    elif args.partitioning_strategy == 'coalesce':
+        log_info(f"Applying coalesce strategy with max_records_per_file={args.max_records_per_file}")
+        spark.conf.set("spark.sql.files.maxRecordsPerFile", args.max_records_per_file)
+        num_partitions = calculate_num_partitions(export_data, args.max_records_per_file, args.target_partitions)
+        log_info(f"Planning coalesce to {num_partitions} partitions (will execute during write)")
+        export_data = export_data.coalesce(num_partitions)
+    else:
+        log_info("No partitioning strategy specified - writing with existing partition structure")
+
+    # Write in requested format (triggers full execution)
+    log_info(f"Starting write operation to {args.s3_path} in {args.format} format")
+    log_info("This action will execute all deferred operations: read → filter → transform → repartition/coalesce → write")
+    write_start = time.time()
+
+    if args.format == 'json':
+        export_data.write.mode("overwrite").json(args.s3_path)
+    elif args.format == 'parquet':
+        export_data = drop_void_fields(export_data)
+        export_data.write.mode("overwrite").option("compression", "zstd").option("compressionLevel", 3).parquet(args.s3_path)
+    else:
+        raise ValueError(f"Unsupported format: {args.format}")
+
+    write_time = time.time() - write_start
+    log_info(f"Write complete in {write_time:.2f} seconds")
+
+
 # Example: python3 ./unload_databricks_data_to_s3.py --table_versions_map test_category_do_not_delete_or_modify.canary_tests.employee=16-16 --data_type EVENT --sql "select unix_millis(current_timestamp()) as time, id as user_id, \"databricks_import_canary_test_event\" as event_type, named_struct('name', name, 'home', home, 'age', age, 'income', income) as user_properties, named_struct('group_type1', ARRAY(\"group_A\", \"group_B\")) as groups, named_struct('group_property', \"group_property_value\") as group_properties from test_category_do_not_delete_or_modify.canary_tests.employee" --secret_scope amplitude_databricks_import --secret_key_name_for_aws_access_key source_destination_55_batch_1350266533_aws_access_key --secret_key_name_for_aws_secret_key source_destination_55_batch_1350266533_aws_secret_key --secret_key_name_for_aws_session_token source_destination_55_batch_1350266533_aws_session_token --s3_region us-west-2 --s3_endpoint s3.us-west-2.amazonaws.com --s3_path s3a://com-amplitude-falcon-stag2/databricks_import/unloaded_data/source_destination_55/batch_1350266533/
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='unload data from databricks using SparkPython')
@@ -322,100 +454,43 @@ if __name__ == '__main__':
 
     sql: str = dbutils.secrets.get(scope=args.secret_scope, key=args.secret_key_name_for_sql)
 
-    # Build temp views
+    # Build temp views (with extra outer try/except to fallback latest-only for all tables)
     table_to_import_version_range_map: dict[str, list[int]] = parse_table_versions_map_arg(args.table_versions_map)
     run_id = get_databricks_run_id()
     log_info(f"Databricks run ID: {run_id}")
     table_results: dict[str, dict[str, object]] = {}
 
-    for table, import_version_range in table_to_import_version_range_map.items():
-        starting_version = import_version_range[0]
-        ending_version = import_version_range[1]
-        log_info(f"Processing table: {table}, version range: {starting_version}-{ending_version}")
-        table_result = {
-            "initialStartVersion": import_version_range[0],
-            "initialEndVersion": import_version_range[1],
-            "initialFetchError": None,
-            "finalStartVersion": import_version_range[0],
-            "finalEndVersion": import_version_range[1],
-        }
-        table_results[table] = table_result
+    try:
+        write_export_data_for_versions(
+            original_sql=sql,
+            table_to_import_version_range_map=table_to_import_version_range_map,
+            data_type=args.data_type,
+            ingestion_in_mutability_mode=args.ingestion_in_mutability_mode,
+            table_results=table_results,
+            args=args,
+            force_latest_only=False,
+        )
+    except Exception as e:
+        sig = extract_missing_cdf_error_signature(e)
+        if sig is None:
+            # non-CDF error: re-raise immediately
+            raise
+        log_info(
+            f"Pipeline failed with CDF missing-file signature ({sig}). "
+            f"Retrying pipeline with latest-only (start=end=end_version) for all tables."
+        )
+        # If we get a CDF error, retry with only the latest version for all tables any exception should propagate
+        write_export_data_for_versions(
+            original_sql=sql,
+            table_to_import_version_range_map=table_to_import_version_range_map,
+            data_type=args.data_type,
+            ingestion_in_mutability_mode=args.ingestion_in_mutability_mode,
+            table_results=table_results,
+            args=args,
+            force_latest_only=True,
+        )
 
-        try:
-            data: DataFrame = fetch_data(table, starting_version, ending_version)
-        except Exception as fetch_error:
-            fallback_signature = extract_missing_cdf_error_signature(fetch_error)
-            if fallback_signature is None:
-                raise
-
-            log_info(
-                f"Encountered missing CDF files for {table} (signature={fallback_signature}). "
-                f"Skipping versions {table_result['initialStartVersion']}-{table_result['initialEndVersion'] - 1} and re-reading at last known good version {ending_version}."
-            )
-            table_result["initialFetchError"] = str(fetch_error)
-            table_result["finalStartVersion"] = ending_version
-            table_result["finalEndVersion"] = ending_version
-
-            data = fetch_data(table, ending_version, ending_version)
-            log_info(f"Successfully read {table} at version {ending_version}.")
-
-        if not args.ingestion_in_mutability_mode:
-            data = filter_data(data, args.data_type)
-
-        view_name: str = build_temp_view_name(table)
-        data.createOrReplaceTempView(view_name)
-        # replace table name in sql to get prepared for sql transformation
-        sql = sql.replace(table, view_name)
-
-    # run SQL to transform data
-    log_info("Creating DataFrame with SQL transformation (execution deferred)")
-    export_data: DataFrame = spark.sql(sql)
-
-    # Validate max_records_per_file for any partitioning strategy
-    if args.partitioning_strategy != 'none' and args.max_records_per_file <= 0:
-        raise ValueError(f"max_records_per_file must be greater than 0 when using partitioning strategy '{args.partitioning_strategy}', got {args.max_records_per_file}")
-    
-    # Apply partitioning strategy
-    # export data with conditional partitioning and format selection
-    if args.partitioning_strategy == 'repartition':
-        log_info(f"Applying repartition strategy with max_records_per_file={args.max_records_per_file}")
-        num_partitions = calculate_num_partitions(export_data, args.max_records_per_file, args.target_partitions)
-        
-        # Add repartition to execution plan (will be applied during write with full shuffle)
-        log_info(f"Planning repartition to {num_partitions} partitions (will execute during write)")
-        export_data = export_data.repartition(num_partitions)
-    elif args.partitioning_strategy == 'coalesce':
-        log_info(f"Applying coalesce strategy with max_records_per_file={args.max_records_per_file}")
-        
-        # TODO - enable this for all partition strategy in future. Not doing that now just be safe.
-        spark.conf.set("spark.sql.files.maxRecordsPerFile", args.max_records_per_file)
-        
-        # Calculate desired number of partitions
-        num_partitions = calculate_num_partitions(export_data, args.max_records_per_file, args.target_partitions)
-        
-        # Add coalesce to execution plan (will be applied during write)
-        log_info(f"Planning coalesce to {num_partitions} partitions (will execute during write)")
-        export_data = export_data.coalesce(num_partitions)
-    else:  # default to 'none'
-        log_info("No partitioning strategy specified - writing with existing partition structure")
-
-    # Write in requested format
-    log_info(f"Starting write operation to {args.s3_path} in {args.format} format")
-    log_info("This action will execute all deferred operations: read → filter → transform → repartition/coalesce → write")
-    write_start = time.time()
-    
-    if args.format == 'json':
-        export_data.write.mode("overwrite").json(args.s3_path)
-    elif args.format == 'parquet':
-        export_data = drop_void_fields(export_data)
-        export_data.write.mode("overwrite").option("compression", "zstd").option("compressionLevel", 3).parquet(args.s3_path)
-    else:
-        raise ValueError(f"Unsupported format: {args.format}")
-    
-    write_time = time.time() - write_start
-    
     total_time = time.time() - start_time
-    log_info(f"Write complete in {write_time:.2f} seconds")
     log_info(f"Total job time: {total_time:.2f} seconds ({total_time/60:.2f} minutes)")
     log_info("Databricks unload job completed successfully")
 
