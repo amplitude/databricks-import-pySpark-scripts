@@ -55,29 +55,22 @@ def get_databricks_run_id() -> str:
     
     Uses safeToJson() which is whitelisted in shared access mode clusters.
     """
-    import json
     
-    # Try safeToJson() attributes to get job run ID
     try:
         context_json = dbutils.notebook.entry_point.getDbutils().notebook().getContext().safeToJson()
         context = json.loads(context_json)
         
-        # Check attributes for job run ID
-        # According to Databricks docs:
-        # - multitaskParentRunId: The job run ID (primary)
-        # - rootRunId: Also the job run ID (fallback)
-        # We explicitly do NOT use currentRunId as it's the task run ID, not job run ID
+        # Get multitaskParentRunId (the job run ID)
+        # Note: We do NOT use currentRunId as it's the task run ID, not job run ID
         attributes = context.get('attributes', {})
+        run_id = attributes.get('multitaskParentRunId')
         
-        # Try to get job run ID only
-        for attr_name in ['multitaskParentRunId', 'rootRunId']:
-            run_id = attributes.get(attr_name)
-            if run_id:
-                log_info(f"Retrieved job run ID from safeToJson() attributes['{attr_name}']: {run_id}")
-                return str(run_id)
+        if run_id:
+            log_info(f"Retrieved job run ID from safeToJson() attributes['multitaskParentRunId']: {run_id}")
+            return str(run_id)
         
-        # If job run ID not found, log available attributes and fall back to UUID
-        log_info(f"WARNING: Job run ID not found in safeToJson(). Available attributes: {list(attributes.keys())}")
+        # If multitaskParentRunId not found, log available attributes and fall back to UUID
+        log_info(f"WARNING: multitaskParentRunId not found in safeToJson(). Available attributes: {list(attributes.keys())}")
     except Exception as exc:
         log_info(f"Failed to retrieve run ID from safeToJson(): {exc}")
     
@@ -366,58 +359,8 @@ if __name__ == '__main__':
             data = fetch_data(table, ending_version, ending_version)
             log_info(f"Successfully read {table} at version {ending_version}.")
 
-        # Count after fetch
-        try:
-            fetch_count = data.count()
-            log_info(f"[STAGE 1: FETCH] Records after fetch_data: {fetch_count:,}")
-            
-            if fetch_count == 0:
-                log_info("[STAGE 1: FETCH] WARNING: DataFrame is empty after fetch")
-            else:
-                # Check for user_id column and count unique users if present
-                if "data" in data.columns:
-                    # Mutability mode - check data.current_version.user_id
-                    try:
-                        unique_users_fetch = data.select("data.current_version.user_id").distinct().count()
-                        log_info(f"[STAGE 1: FETCH] Unique user_ids (data.current_version.user_id): {unique_users_fetch:,}")
-                        if unique_users_fetch > 0:
-                            log_info(f"[STAGE 1: FETCH] Duplication factor: {fetch_count / unique_users_fetch:.2f}x")
-                    except Exception as e:
-                        log_info(f"[STAGE 1: FETCH] ERROR counting unique users: {e}")
-                elif "user_id" in data.columns:
-                    # Non-mutability mode - check user_id directly
-                    try:
-                        unique_users_fetch = data.select("user_id").distinct().count()
-                        log_info(f"[STAGE 1: FETCH] Unique user_ids: {unique_users_fetch:,}")
-                        if unique_users_fetch > 0:
-                            log_info(f"[STAGE 1: FETCH] Duplication factor: {fetch_count / unique_users_fetch:.2f}x")
-                    except Exception as e:
-                        log_info(f"[STAGE 1: FETCH] ERROR counting unique users: {e}")
-        except Exception as e:
-            log_info(f"[STAGE 1: FETCH] ERROR during count operation: {e}")
-            raise
-
         if not args.ingestion_in_mutability_mode:
             data = filter_data(data, args.data_type)
-            
-            # Count after filter
-            try:
-                filter_count = data.count()
-                log_info(f"[STAGE 2: FILTER] Records after filter_data: {filter_count:,}")
-                
-                if filter_count == 0:
-                    log_info("[STAGE 2: FILTER] WARNING: DataFrame is empty after filter")
-                elif "user_id" in data.columns:
-                    try:
-                        unique_users_filter = data.select("user_id").distinct().count()
-                        log_info(f"[STAGE 2: FILTER] Unique user_ids: {unique_users_filter:,}")
-                        if unique_users_filter > 0:
-                            log_info(f"[STAGE 2: FILTER] Duplication factor: {filter_count / unique_users_filter:.2f}x")
-                    except Exception as e:
-                        log_info(f"[STAGE 2: FILTER] ERROR counting unique users: {e}")
-            except Exception as e:
-                log_info(f"[STAGE 2: FILTER] ERROR during count operation: {e}")
-                raise
 
         view_name: str = build_temp_view_name(table)
         data.createOrReplaceTempView(view_name)
@@ -426,49 +369,7 @@ if __name__ == '__main__':
 
     # run SQL to transform data
     log_info("Creating DataFrame with SQL transformation (execution deferred)")
-    log_info(f"Transformation SQL (first 500 chars): {sql[:500]}")
     export_data: DataFrame = spark.sql(sql)
-    
-    # Count after SQL transformation
-    try:
-        transform_count = export_data.count()
-        log_info(f"[STAGE 3: TRANSFORM] Records after SQL transformation: {transform_count:,}")
-        
-        if transform_count == 0:
-            log_info("[STAGE 3: TRANSFORM] WARNING: DataFrame is empty after transformation")
-        else:
-            # Check for user_id in transformed data
-            if "data" in export_data.columns:
-                # Mutability mode - check data.current_version.user_id
-                try:
-                    unique_users_transform = export_data.select("data.current_version.user_id").distinct().count()
-                    log_info(f"[STAGE 3: TRANSFORM] Unique user_ids (data.current_version.user_id): {unique_users_transform:,}")
-                    if unique_users_transform > 0:
-                        log_info(f"[STAGE 3: TRANSFORM] Duplication factor: {transform_count / unique_users_transform:.2f}x")
-                except Exception as e:
-                    log_info(f"[STAGE 3: TRANSFORM] ERROR counting unique users: {e}")
-                
-                # Check sort_index distribution
-                if "sort_index" in export_data.columns:
-                    try:
-                        sort_index_stats = export_data.select("sort_index").describe().collect()
-                        log_info(f"[STAGE 3: TRANSFORM] sort_index stats: {sort_index_stats}")
-                        unique_sort_indices = export_data.select("sort_index").distinct().count()
-                        log_info(f"[STAGE 3: TRANSFORM] Unique sort_index values: {unique_sort_indices:,}")
-                    except Exception as e:
-                        log_info(f"[STAGE 3: TRANSFORM] ERROR analyzing sort_index: {e}")
-            elif "user_id" in export_data.columns:
-                # Non-mutability mode
-                try:
-                    unique_users_transform = export_data.select("user_id").distinct().count()
-                    log_info(f"[STAGE 3: TRANSFORM] Unique user_ids: {unique_users_transform:,}")
-                    if unique_users_transform > 0:
-                        log_info(f"[STAGE 3: TRANSFORM] Duplication factor: {transform_count / unique_users_transform:.2f}x")
-                except Exception as e:
-                    log_info(f"[STAGE 3: TRANSFORM] ERROR counting unique users: {e}")
-    except Exception as e:
-        log_info(f"[STAGE 3: TRANSFORM] ERROR during count operation: {e}")
-        raise
 
     # Validate max_records_per_file for any partitioning strategy
     if args.partitioning_strategy != 'none' and args.max_records_per_file <= 0:
@@ -477,39 +378,14 @@ if __name__ == '__main__':
     # Apply partitioning strategy
     # export data with conditional partitioning and format selection
     if args.partitioning_strategy == 'repartition':
-        log_info(f"[STAGE 4: PARTITION] Applying repartition strategy with max_records_per_file={args.max_records_per_file}")
+        log_info(f"Applying repartition strategy with max_records_per_file={args.max_records_per_file}")
         num_partitions = calculate_num_partitions(export_data, args.max_records_per_file, args.target_partitions)
         
         # Add repartition to execution plan (will be applied during write with full shuffle)
-        log_info(f"[STAGE 4: PARTITION] Planning repartition to {num_partitions} partitions (will execute during write)")
+        log_info(f"Planning repartition to {num_partitions} partitions (will execute during write)")
         export_data = export_data.repartition(num_partitions)
-        
-        # Count after repartition to verify no duplication
-        try:
-            repartition_count = export_data.count()
-            log_info(f"[STAGE 4: PARTITION] Records after repartition: {repartition_count:,}")
-            
-            if "data" in export_data.columns:
-                try:
-                    unique_users_repartition = export_data.select("data.current_version.user_id").distinct().count()
-                    log_info(f"[STAGE 4: PARTITION] Unique user_ids after repartition: {unique_users_repartition:,}")
-                    if unique_users_repartition > 0:
-                        log_info(f"[STAGE 4: PARTITION] Duplication factor: {repartition_count / unique_users_repartition:.2f}x")
-                except Exception as e:
-                    log_info(f"[STAGE 4: PARTITION] ERROR counting unique users: {e}")
-            elif "user_id" in export_data.columns:
-                try:
-                    unique_users_repartition = export_data.select("user_id").distinct().count()
-                    log_info(f"[STAGE 4: PARTITION] Unique user_ids after repartition: {unique_users_repartition:,}")
-                    if unique_users_repartition > 0:
-                        log_info(f"[STAGE 4: PARTITION] Duplication factor: {repartition_count / unique_users_repartition:.2f}x")
-                except Exception as e:
-                    log_info(f"[STAGE 4: PARTITION] ERROR counting unique users: {e}")
-        except Exception as e:
-            log_info(f"[STAGE 4: PARTITION] ERROR during count operation: {e}")
-            # Don't raise - allow job to continue
     elif args.partitioning_strategy == 'coalesce':
-        log_info(f"[STAGE 4: PARTITION] Applying coalesce strategy with max_records_per_file={args.max_records_per_file}")
+        log_info(f"Applying coalesce strategy with max_records_per_file={args.max_records_per_file}")
         
         # TODO - enable this for all partition strategy in future. Not doing that now just be safe.
         spark.conf.set("spark.sql.files.maxRecordsPerFile", args.max_records_per_file)
@@ -518,49 +394,19 @@ if __name__ == '__main__':
         num_partitions = calculate_num_partitions(export_data, args.max_records_per_file, args.target_partitions)
         
         # Add coalesce to execution plan (will be applied during write)
-        log_info(f"[STAGE 4: PARTITION] Planning coalesce to {num_partitions} partitions (will execute during write)")
+        log_info(f"Planning coalesce to {num_partitions} partitions (will execute during write)")
         export_data = export_data.coalesce(num_partitions)
-        
-        # Count after coalesce
-        try:
-            coalesce_count = export_data.count()
-            log_info(f"[STAGE 4: PARTITION] Records after coalesce: {coalesce_count:,}")
-            
-            if "data" in export_data.columns:
-                try:
-                    unique_users_coalesce = export_data.select("data.current_version.user_id").distinct().count()
-                    log_info(f"[STAGE 4: PARTITION] Unique user_ids after coalesce: {unique_users_coalesce:,}")
-                    if unique_users_coalesce > 0:
-                        log_info(f"[STAGE 4: PARTITION] Duplication factor: {coalesce_count / unique_users_coalesce:.2f}x")
-                except Exception as e:
-                    log_info(f"[STAGE 4: PARTITION] ERROR counting unique users: {e}")
-            elif "user_id" in export_data.columns:
-                try:
-                    unique_users_coalesce = export_data.select("user_id").distinct().count()
-                    log_info(f"[STAGE 4: PARTITION] Unique user_ids after coalesce: {unique_users_coalesce:,}")
-                    if unique_users_coalesce > 0:
-                        log_info(f"[STAGE 4: PARTITION] Duplication factor: {coalesce_count / unique_users_coalesce:.2f}x")
-                except Exception as e:
-                    log_info(f"[STAGE 4: PARTITION] ERROR counting unique users: {e}")
-        except Exception as e:
-            log_info(f"[STAGE 4: PARTITION] ERROR during count operation: {e}")
-            # Don't raise - allow job to continue
     else:  # default to 'none'
-        log_info("[STAGE 4: PARTITION] No partitioning strategy specified - writing with existing partition structure")
-        try:
-            log_info(f"[STAGE 4: PARTITION] Current partition count: {export_data.rdd.getNumPartitions()}")
-        except Exception as e:
-            log_info(f"[STAGE 4: PARTITION] ERROR getting partition count: {e}")
+        log_info("No partitioning strategy specified - writing with existing partition structure")
 
     # Write in requested format
-    log_info(f"[STAGE 5: WRITE] Starting write operation to {args.s3_path} in {args.format} format")
-    log_info("[STAGE 5: WRITE] This action will execute all deferred operations: read → filter → transform → repartition/coalesce → write")
+    log_info(f"Starting write operation to {args.s3_path} in {args.format} format")
+    log_info("This action will execute all deferred operations: read → filter → transform → repartition/coalesce → write")
     write_start = time.time()
     
     if args.format == 'json':
         export_data.write.mode("overwrite").json(args.s3_path)
     elif args.format == 'parquet':
-        log_info("[STAGE 5: WRITE] Dropping void fields before Parquet write")
         export_data = drop_void_fields(export_data)
         export_data.write.mode("overwrite").option("compression", "zstd").option("compressionLevel", 3).parquet(args.s3_path)
     else:
@@ -569,19 +415,9 @@ if __name__ == '__main__':
     write_time = time.time() - write_start
     
     total_time = time.time() - start_time
-    log_info(f"[STAGE 5: WRITE] Write complete in {write_time:.2f} seconds")
+    log_info(f"Write complete in {write_time:.2f} seconds")
     log_info(f"Total job time: {total_time:.2f} seconds ({total_time/60:.2f} minutes)")
-    log_info("="*80)
-    log_info("DUPLICATION ANALYSIS SUMMARY")
-    log_info("="*80)
-    log_info("Check logs above for duplication factors at each stage:")
-    log_info("  STAGE 1: FETCH - After reading from Delta table")
-    log_info("  STAGE 2: FILTER - After filtering change types (if not in mutability mode)")
-    log_info("  STAGE 3: TRANSFORM - After SQL transformation")
-    log_info("  STAGE 4: PARTITION - After repartition/coalesce (if applied)")
-    log_info("  STAGE 5: WRITE - Final write to S3")
-    log_info("="*80)
-    log_info("Databricks unload completed successfully")
+    log_info("Databricks unload job completed successfully")
 
     logs_base = args.s3_path.rstrip("/") + f"/logs/run_{run_id}"
     log_info(f"Writing logs to {logs_base}")
