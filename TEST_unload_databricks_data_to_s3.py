@@ -70,7 +70,7 @@ def get_databricks_run_id() -> str:
         import json
         context = json.loads(context_json)
         
-        run_id = context.get('currentRunId', {}).get('id')
+        run_id = (context.get('currentRunId') or {}).get('id')
         if run_id:
             log_info(f"Retrieved run ID from context JSON: {run_id}")
             return str(run_id)
