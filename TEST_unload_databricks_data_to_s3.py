@@ -53,71 +53,31 @@ def get_databricks_run_id() -> str:
     This script is always executed as a SparkPythonTask, never as a notebook.
     Falls back to UUID if retrieval fails.
     
-    Tries multiple methods in order of reliability for shared access mode clusters.
+    Uses safeToJson() which is whitelisted in shared access mode clusters.
     """
     import json
-    import os
     
-    # Method 1: Try Spark configuration (most reliable for job compute)
-    try:
-        run_id = spark.conf.get("spark.databricks.job.runId")
-        if run_id:
-            log_info(f"Retrieved run ID from Spark config: {run_id}")
-            return str(run_id)
-    except Exception as exc:
-        log_info(f"Failed to retrieve run ID from Spark config: {exc}")
-    
-    # Method 2: Try TaskContext local properties (works in shared access mode)
-    try:
-        from pyspark.taskcontext import TaskContext
-        tc = TaskContext.get()
-        if tc:
-            # Try to get run ID from cluster usage tags
-            tags_json = tc.getLocalProperty("spark.databricks.clusterUsageTags.clusterAllTags")
-            if tags_json:
-                tags = dict(item.values() for item in json.loads(tags_json))
-                run_id = tags.get('RunId') or tags.get('runId')
-                if run_id:
-                    log_info(f"Retrieved run ID from TaskContext cluster tags: {run_id}")
-                    return str(run_id)
-    except Exception as exc:
-        log_info(f"Failed to retrieve run ID from TaskContext: {exc}")
-    
-    # Method 3: Try environment variable DATABRICKS_RUN_ID
-    try:
-        run_id = os.getenv('DATABRICKS_RUN_ID')
-        if run_id:
-            log_info(f"Retrieved run ID from DATABRICKS_RUN_ID env var: {run_id}")
-            return str(run_id)
-    except Exception as exc:
-        log_info(f"Failed to retrieve run ID from DATABRICKS_RUN_ID: {exc}")
-    
-    # Method 4: Try environment variable DB_JOB_RUN_ID
-    try:
-        run_id = os.getenv('DB_JOB_RUN_ID')
-        if run_id:
-            log_info(f"Retrieved run ID from DB_JOB_RUN_ID env var: {run_id}")
-            return str(run_id)
-    except Exception as exc:
-        log_info(f"Failed to retrieve run ID from DB_JOB_RUN_ID: {exc}")
-    
-    # Method 5: Try safeToJson() attributes - currentRunId is a direct string attribute
+    # Try safeToJson() attributes to get job run ID
     try:
         context_json = dbutils.notebook.entry_point.getDbutils().notebook().getContext().safeToJson()
         context = json.loads(context_json)
         
-        # Check attributes for run ID - currentRunId is a string attribute, not a nested object
+        # Check attributes for job run ID
+        # According to Databricks docs:
+        # - multitaskParentRunId: The job run ID (primary)
+        # - rootRunId: Also the job run ID (fallback)
+        # We explicitly do NOT use currentRunId as it's the task run ID, not job run ID
         attributes = context.get('attributes', {})
         
-        # Try each attribute and log which one works
-        for attr_name in ['currentRunId', 'rootRunId', 'runId', 'jobRunId', 'RunId']:
+        # Try to get job run ID only
+        for attr_name in ['multitaskParentRunId', 'rootRunId']:
             run_id = attributes.get(attr_name)
             if run_id:
-                log_info(f"Retrieved run ID from safeToJson() attributes['{attr_name}']: {run_id}")
+                log_info(f"Retrieved job run ID from safeToJson() attributes['{attr_name}']: {run_id}")
                 return str(run_id)
         
-        # If none found, log available attributes
-        log_info(f"WARNING: runId not found in safeToJson(). Available attributes: {list(attributes.keys())}")
+        # If job run ID not found, log available attributes and fall back to UUID
+        log_info(f"WARNING: Job run ID not found in safeToJson(). Available attributes: {list(attributes.keys())}")
     except Exception as exc:
         log_info(f"Failed to retrieve run ID from safeToJson(): {exc}")
     
