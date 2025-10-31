@@ -473,11 +473,38 @@ if __name__ == '__main__':
     aws_access_key = dbutils.secrets.get(scope=args.secret_scope, key=args.secret_key_name_for_aws_access_key)
     aws_secret_key = dbutils.secrets.get(scope=args.secret_scope, key=args.secret_key_name_for_aws_secret_key)
     aws_session_token = dbutils.secrets.get(scope=args.secret_scope, key=args.secret_key_name_for_aws_session_token)
-    spark.conf.set("fs.s3a.aws.credentials.provider", "org.apache.hadoop.fs.s3a.TemporaryAWSCredentialsProvider")
-    spark.conf.set("fs.s3a.access.key", aws_access_key)
-    spark.conf.set("fs.s3a.secret.key", aws_secret_key)
-    spark.conf.set("fs.s3a.session.token", aws_session_token)
-    spark.conf.set("fs.s3a.endpoint", args.s3_endpoint)
+
+    # Check if running in serverless compute (which doesn't allow fs.s3a.* configurations)
+    is_serverless = False
+    try:
+        # Try to set traditional S3 configurations
+        spark.conf.set("fs.s3a.aws.credentials.provider", "org.apache.hadoop.fs.s3a.TemporaryAWSCredentialsProvider")
+        spark.conf.set("fs.s3a.access.key", aws_access_key)
+        spark.conf.set("fs.s3a.secret.key", aws_secret_key)
+        spark.conf.set("fs.s3a.session.token", aws_session_token)
+    except Exception as e:
+        if "CONFIG_NOT_AVAILABLE" in str(e) or "Configuration" in str(e):
+            log_info("Detected serverless compute, using environment variables for S3 credentials")
+            is_serverless = True
+            # Set environment variables for serverless
+            import os
+            os.environ["AWS_ACCESS_KEY_ID"] = aws_access_key
+            os.environ["AWS_SECRET_ACCESS_KEY"] = aws_secret_key
+            os.environ["AWS_SESSION_TOKEN"] = aws_session_token
+        else:
+            raise e
+
+    if not is_serverless:
+        log_info("Using traditional cluster configuration for S3 credentials")
+
+    # Set S3 endpoint (may not be configurable in serverless)
+    try:
+        spark.conf.set("fs.s3a.endpoint", args.s3_endpoint)
+    except Exception as e:
+        if "CONFIG_NOT_AVAILABLE" in str(e) or "Configuration" in str(e):
+            log_info("fs.s3a.endpoint not configurable in serverless environment, skipping")
+        else:
+            raise e
 
 
     sql: str = dbutils.secrets.get(scope=args.secret_scope, key=args.secret_key_name_for_sql)
