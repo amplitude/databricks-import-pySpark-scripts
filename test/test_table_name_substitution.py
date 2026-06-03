@@ -93,6 +93,22 @@ class TestReplaceTableNameInSql(unittest.TestCase):
                     result,
                 )
 
+    def test_rewrites_table_name_used_as_a_qualified_column_prefix(self):
+        # A fully-qualified table name can also appear as a column qualifier
+        # (e.g. `cat.sch.t.col`). That prefix refers to the same table and must
+        # be rewritten to the temp view too, otherwise the SELECT list points at
+        # the original table while the FROM points at the view. The '.' before
+        # `col` must NOT block the match (it is a separator, not part of the
+        # table identifier).
+        for module_name, replace_table_name_in_sql in _helpers():
+            with self.subTest(module=module_name):
+                sql = "SELECT cat.sch.t.col FROM cat.sch.t"
+                result = replace_table_name_in_sql(sql, "cat.sch.t", "`cat.sch.t.42`")
+                self.assertEqual(
+                    "SELECT `cat.sch.t.42`.col FROM `cat.sch.t.42`",
+                    result,
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

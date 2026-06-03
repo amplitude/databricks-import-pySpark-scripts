@@ -254,10 +254,13 @@ def export_meta_data(event_count: int, partition_count: int):
 
 
 
-# Characters that are valid inside a (possibly backtick-quoted, fully-qualified)
-# SQL identifier. If a match is preceded or followed by one of these, it is part
-# of a longer identifier and must NOT be replaced.
-_IDENTIFIER_CHAR = r"[A-Za-z0-9_.`]"
+# Characters that are part of a single SQL identifier token (a backtick-quoted
+# name counts). A match adjacent to one of these is part of a longer identifier
+# and must NOT be replaced. '.' is intentionally excluded so a fully-qualified
+# name used as a column prefix (`cat.sch.t.col`) is still rewritten to the view,
+# while substring collisions (e.g. dim_product vs dim_product_version_map) are
+# still blocked by the alphanumeric/underscore boundary.
+_IDENTIFIER_CHAR = r"[A-Za-z0-9_`]"
 
 
 def replace_table_name_in_sql(sql: str, table_name: str, replacement: str) -> str:
@@ -274,8 +277,10 @@ def replace_table_name_in_sql(sql: str, table_name: str, replacement: str) -> st
     rejects with ``PARSE_SYNTAX_ERROR ... at or near 'AS'``.
 
     We therefore only replace matches that are not adjacent to another identifier
-    character (alphanumerics, ``_``, ``.`` or a backtick), so a table name is
-    never spliced into the middle of a longer table name.
+    character (alphanumerics, ``_`` or a backtick), so a table name is never
+    spliced into the middle of a longer table name. ``.`` is deliberately not
+    treated as an identifier boundary, so a fully-qualified name used as a column
+    prefix (``cat.sch.t.col``) is rewritten to the view as well.
     """
     pattern = re.compile(
         r"(?<!" + _IDENTIFIER_CHAR + r")"
