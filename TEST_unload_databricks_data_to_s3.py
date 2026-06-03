@@ -9,6 +9,7 @@ import argparse
 import collections
 import json
 import math
+import re
 import uuid
 import time
 from typing import Optional
@@ -260,6 +261,40 @@ def export_meta_data(event_count: int, partition_count: int):
 
 
 
+# Characters that are part of a single SQL identifier token (a backtick-quoted
+# name counts). A match adjacent to one of these is part of a longer identifier
+# and must NOT be replaced. '.' is intentionally excluded so a fully-qualified
+# name used as a column prefix (`cat.sch.t.col`) is still rewritten to the view,
+# while substring collisions (e.g. dim_product vs dim_product_version_map) are
+# still blocked by the alphanumeric/underscore boundary.
+_IDENTIFIER_CHAR = r"[A-Za-z0-9_`]"
+
+
+def replace_table_name_in_sql(sql: str, table_name: str, replacement: str) -> str:
+    """
+    Replace whole-identifier occurrences of a fully-qualified table name in SQL
+    with a replacement (temp view) name.
+
+    A naive ``sql.replace(table_name, replacement)`` is unsafe when one source
+    table name is a substring of another. For example ``cat.sch.dim_product`` is
+    contained in ``cat.sch.dim_product_version_map``, so replacing the shorter
+    name also rewrites the middle of the longer reference, producing invalid SQL
+    that Databricks rejects with ``PARSE_SYNTAX_ERROR ... at or near 'AS'``.
+
+    We only replace matches that are not adjacent to another identifier character
+    (alphanumerics, ``_`` or a backtick), so a table name is never spliced into
+    the middle of a longer table name. ``.`` is deliberately not treated as an
+    identifier boundary, so a fully-qualified name used as a column prefix
+    (``cat.sch.t.col``) is rewritten to the view as well.
+    """
+    pattern = re.compile(
+        r"(?<!" + _IDENTIFIER_CHAR + r")"
+        + re.escape(table_name)
+        + r"(?!" + _IDENTIFIER_CHAR + r")"
+    )
+    return pattern.sub(lambda _match: replacement, sql)
+
+
 def build_views_for_tables(
         original_sql: str,
         table_to_import_version_range_map: dict[str, list[int]],
@@ -316,7 +351,7 @@ def build_views_for_tables(
             table_results[table]["finalStartVersion"] = ending_version
             table_results[table]["finalEndVersion"] = ending_version
             view_name = _fetch_and_create_view(ending_version, ending_version)
-            sql_local = sql_local.replace(table, view_name)
+            sql_local = replace_table_name_in_sql(sql_local, table, view_name)
             log_info(f"Forced latest-only read for {table} at version {ending_version}.")
             continue
 
@@ -326,7 +361,7 @@ def build_views_for_tables(
         # handled by the higher-level catch during the write phase.
         try:
             view_name = _fetch_and_create_view(starting_version, ending_version)
-            sql_local = sql_local.replace(table, view_name)
+            sql_local = replace_table_name_in_sql(sql_local, table, view_name)
         except Exception as fetch_error:
             fallback_signature = extract_missing_cdf_error_signature(fetch_error)
             if fallback_signature is None:
@@ -341,10 +376,30 @@ def build_views_for_tables(
             table_results[table]["finalEndVersion"] = ending_version
 
             view_name = _fetch_and_create_view(ending_version, ending_version)
-            sql_local = sql_local.replace(table, view_name)
+            sql_local = replace_table_name_in_sql(sql_local, table, view_name)
             log_info(f"Successfully read {table} at version {ending_version}.")
 
     return sql_local
+
+
+def build_export_dataframe(sql_to_run: str) -> DataFrame:
+    """
+    Run the transformed SQL and return the export DataFrame.
+
+    The transformed SQL has each source table swapped for a temp view, so it
+    differs from the customer's original query and is not otherwise recoverable
+    from the run logs. If Spark rejects it (e.g. a parse/analysis error), log the
+    exact SQL submitted so the failure can be root-caused directly. The original
+    exception is re-raised unchanged so existing retry/error handling is intact.
+    """
+    try:
+        return spark.sql(sql_to_run)
+    except Exception:
+        log_info(
+            "Failed to build DataFrame from transformed SQL. "
+            f"SQL submitted to Spark:\n{sql_to_run}"
+        )
+        raise
 
 
 def write_export_data_for_versions(
@@ -375,7 +430,7 @@ def write_export_data_for_versions(
 
     # Create export DataFrame (deferred execution)
     log_info("Creating DataFrame with SQL transformation (execution deferred)")
-    export_data: DataFrame = spark.sql(sql_to_run)
+    export_data: DataFrame = build_export_dataframe(sql_to_run)
 
     # Validate max_records_per_file for any partitioning strategy
     if args.partitioning_strategy != 'none' and args.max_records_per_file <= 0:
