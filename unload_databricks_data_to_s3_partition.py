@@ -1,6 +1,7 @@
 import argparse
 import collections
 import math
+import re
 import time
 
 from pyspark.sql import SparkSession
@@ -39,6 +40,35 @@ def build_temp_view_name(table_full_name: str) -> str:
     :return: temp view name for the table
     """
     return '`{table}.{epoch}`'.format(table=table_full_name, epoch=int(time.time()))
+
+
+# Characters that are valid inside a (possibly backtick-quoted, fully-qualified)
+# SQL identifier. If a match is preceded or followed by one of these, it is part
+# of a longer identifier and must NOT be replaced.
+_IDENTIFIER_CHAR = r"[A-Za-z0-9_.`]"
+
+
+def replace_table_name_in_sql(sql: str, table_name: str, replacement: str) -> str:
+    """
+    Replace whole-identifier occurrences of a fully-qualified table name in SQL
+    with a replacement (temp view) name.
+
+    A naive ``sql.replace(table_name, replacement)`` is unsafe when one source
+    table name is a substring of another. For example ``cat.sch.dim_product`` is
+    contained in ``cat.sch.dim_product_version_map``, so replacing the shorter
+    name also rewrites the middle of the longer reference, producing invalid SQL
+    that Databricks rejects with ``PARSE_SYNTAX_ERROR ... at or near 'AS'``.
+
+    We only replace matches that are not adjacent to another identifier character
+    (alphanumerics, ``_``, ``.`` or a backtick), so a table name is never spliced
+    into the middle of a longer table name.
+    """
+    pattern = re.compile(
+        r"(?<!" + _IDENTIFIER_CHAR + r")"
+        + re.escape(table_name)
+        + r"(?!" + _IDENTIFIER_CHAR + r")"
+    )
+    return pattern.sub(lambda _match: replacement, sql)
 
 
 def build_sql_to_query_table_of_version(table_full_name: str, ending_version: int) -> str:
@@ -142,7 +172,7 @@ if __name__ == '__main__':
         view_name: str = build_temp_view_name(table)
         data.createOrReplaceTempView(view_name)
         # replace table name in sql to get prepared for sql transformation
-        sql = sql.replace(table, view_name)
+        sql = replace_table_name_in_sql(sql, table, view_name)
 
     # run SQL to transform data
     export_data: DataFrame = spark.sql(sql)

@@ -2,6 +2,7 @@ import argparse
 import collections
 import json
 import math
+import re
 import uuid
 import time
 from typing import Optional
@@ -253,6 +254,39 @@ def export_meta_data(event_count: int, partition_count: int):
 
 
 
+# Characters that are valid inside a (possibly backtick-quoted, fully-qualified)
+# SQL identifier. If a match is preceded or followed by one of these, it is part
+# of a longer identifier and must NOT be replaced.
+_IDENTIFIER_CHAR = r"[A-Za-z0-9_.`]"
+
+
+def replace_table_name_in_sql(sql: str, table_name: str, replacement: str) -> str:
+    """
+    Replace whole-identifier occurrences of a fully-qualified table name in SQL
+    with a replacement (temp view) name.
+
+    A naive ``sql.replace(table_name, replacement)`` is unsafe when one source
+    table name is a substring of another. For example
+    ``cat.sch.dim_product`` is contained in ``cat.sch.dim_product_version_map``,
+    so replacing the shorter name also rewrites the middle of the longer
+    reference, producing invalid SQL such as
+    ``\\`cat.sch.dim_product.<epoch>\\`_version_map AS dpvm`` which Databricks
+    rejects with ``PARSE_SYNTAX_ERROR ... at or near 'AS'``.
+
+    We therefore only replace matches that are not adjacent to another identifier
+    character (alphanumerics, ``_``, ``.`` or a backtick), so a table name is
+    never spliced into the middle of a longer table name.
+    """
+    pattern = re.compile(
+        r"(?<!" + _IDENTIFIER_CHAR + r")"
+        + re.escape(table_name)
+        + r"(?!" + _IDENTIFIER_CHAR + r")"
+    )
+    # Use a function replacement so backslashes / group references in the view
+    # name are inserted literally rather than interpreted by re.sub.
+    return pattern.sub(lambda _match: replacement, sql)
+
+
 def build_views_for_tables(
         original_sql: str,
         table_to_import_version_range_map: dict[str, list[int]],
@@ -309,7 +343,7 @@ def build_views_for_tables(
             table_results[table]["finalStartVersion"] = ending_version
             table_results[table]["finalEndVersion"] = ending_version
             view_name = _fetch_and_create_view(ending_version, ending_version)
-            sql_local = sql_local.replace(table, view_name)
+            sql_local = replace_table_name_in_sql(sql_local, table, view_name)
             log_info(f"Forced latest-only read for {table} at version {ending_version}.")
             continue
 
@@ -319,7 +353,7 @@ def build_views_for_tables(
         # handled by the higher-level catch during the write phase.
         try:
             view_name = _fetch_and_create_view(starting_version, ending_version)
-            sql_local = sql_local.replace(table, view_name)
+            sql_local = replace_table_name_in_sql(sql_local, table, view_name)
         except Exception as fetch_error:
             fallback_signature = extract_missing_cdf_error_signature(fetch_error)
             if fallback_signature is None:
@@ -334,7 +368,7 @@ def build_views_for_tables(
             table_results[table]["finalEndVersion"] = ending_version
 
             view_name = _fetch_and_create_view(ending_version, ending_version)
-            sql_local = sql_local.replace(table, view_name)
+            sql_local = replace_table_name_in_sql(sql_local, table, view_name)
             log_info(f"Successfully read {table} at version {ending_version}.")
 
     return sql_local
