@@ -374,6 +374,26 @@ def build_views_for_tables(
     return sql_local
 
 
+def build_export_dataframe(sql_to_run: str) -> DataFrame:
+    """
+    Run the transformed SQL and return the export DataFrame.
+
+    The transformed SQL has each source table swapped for a temp view, so it
+    differs from the customer's original query and is not otherwise recoverable
+    from the run logs. If Spark rejects it (e.g. a parse/analysis error), log the
+    exact SQL submitted so the failure can be root-caused directly. The original
+    exception is re-raised unchanged so existing retry/error handling is intact.
+    """
+    try:
+        return spark.sql(sql_to_run)
+    except Exception:
+        log_info(
+            "Failed to build DataFrame from transformed SQL. "
+            f"SQL submitted to Spark:\n{sql_to_run}"
+        )
+        raise
+
+
 def write_export_data_for_versions(
         original_sql: str,
         table_to_import_version_range_map: dict[str, list[int]],
@@ -402,7 +422,7 @@ def write_export_data_for_versions(
 
     # Create export DataFrame (deferred execution)
     log_info("Creating DataFrame with SQL transformation (execution deferred)")
-    export_data: DataFrame = spark.sql(sql_to_run)
+    export_data: DataFrame = build_export_dataframe(sql_to_run)
 
     # Validate max_records_per_file for any partitioning strategy
     if args.partitioning_strategy != 'none' and args.max_records_per_file <= 0:

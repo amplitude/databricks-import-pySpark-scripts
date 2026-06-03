@@ -174,8 +174,15 @@ if __name__ == '__main__':
         # replace table name in sql to get prepared for sql transformation
         sql = replace_table_name_in_sql(sql, table, view_name)
 
-    # run SQL to transform data
-    export_data: DataFrame = spark.sql(sql)
+    # run SQL to transform data. The transformed SQL has each source table
+    # swapped for a temp view, so it differs from the customer's original query;
+    # log the exact SQL if Spark rejects it (e.g. a parse error) so the failure
+    # can be root-caused, then re-raise unchanged.
+    try:
+        export_data: DataFrame = spark.sql(sql)
+    except Exception:
+        print("Failed to build DataFrame from transformed SQL. SQL submitted to Spark:\n{sql}".format(sql=sql))
+        raise
 
     num_partitions = math.ceil(export_data.count() / args.max_records_per_file)
 
