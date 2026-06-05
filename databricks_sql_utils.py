@@ -7,26 +7,57 @@ and the unit tests can use it with no Spark install. On the Databricks cluster t
 whole repo is checked out (jobs run as SparkPythonTask with Source.GIT), so the
 entrypoint scripts import it directly.
 """
-import collections
 import re
 import time
 
 
 def parse_table_versions_map_arg(table_versions_map: str) -> dict[str, list[int]]:
     """
-    Extract table && version range numbers from input str.
+    Extract table and version range numbers from input str.
     :param table_versions_map: table versions map. Sample input 'catalog.schema.table=1-2,catalog.schema2.table2=11-12'
     which means table 'catalog.schema.table' with version range [1,2] and table 'catalog.schema2.table2'
     with version range [11,12].
     :return: table to version ranges map. Sample output: {'catalog.schema.table': [1,2]}
+
+    Fails fast with a clear ValueError on malformed input (missing '=', missing
+    'start-end' range, non-integer versions, empty entry) and on a duplicate table,
+    since this helper backs customer-facing tools as well as the unload jobs.
     """
-    dictionary = collections.defaultdict(list)
-    table_and_versions_list = table_versions_map.split(",")
-    for table_and_versions in table_and_versions_list:
-        table_name = table_and_versions.split("=")[0]
-        versions = table_and_versions.split("=")[1].split("-")
-        dictionary[table_name].append(int(versions[0]))
-        dictionary[table_name].append(int(versions[1]))
+    dictionary: dict[str, list[int]] = {}
+    for entry in table_versions_map.split(","):
+        entry = entry.strip()
+        if not entry:
+            raise ValueError(
+                "Empty entry in table_versions_map; expected comma-separated "
+                "'catalog.schema.table=startVersion-endVersion' entries."
+            )
+        if entry.count("=") != 1:
+            raise ValueError(
+                f"Invalid table_versions_map entry '{entry}'; expected exactly one '=' "
+                "as in 'catalog.schema.table=startVersion-endVersion'."
+            )
+        table_name, version_range = (part.strip() for part in entry.split("="))
+        if not table_name:
+            raise ValueError(f"Missing table name in table_versions_map entry '{entry}'.")
+        version_parts = version_range.split("-")
+        if len(version_parts) != 2:
+            raise ValueError(
+                f"Invalid version range '{version_range}' for table '{table_name}'; "
+                "expected 'startVersion-endVersion' (e.g. '0-12')."
+            )
+        try:
+            starting_version = int(version_parts[0])
+            ending_version = int(version_parts[1])
+        except ValueError:
+            raise ValueError(
+                f"Non-integer version in '{version_range}' for table '{table_name}'; "
+                "versions must be integers (e.g. '0-12')."
+            ) from None
+        if table_name in dictionary:
+            raise ValueError(f"Duplicate table '{table_name}' in table_versions_map.")
+        dictionary[table_name] = [starting_version, ending_version]
+    if not dictionary:
+        raise ValueError("table_versions_map is empty.")
     return dictionary
 
 

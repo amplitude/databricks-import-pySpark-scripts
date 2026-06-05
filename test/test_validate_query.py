@@ -39,6 +39,14 @@ class TestRequiredColumnsFor(unittest.TestCase):
     def test_warehouse_property_identity_only(self):
         self.assertEqual({"user_id"}, required_columns_for("WAREHOUSE_PROPERTY", "USER_ID"))
 
+    def test_rejects_unknown_data_type(self):
+        with self.assertRaises(ValueError):
+            required_columns_for("BOGUS", "USER_ID")
+
+    def test_rejects_unknown_record_identity(self):
+        with self.assertRaises(ValueError):
+            required_columns_for("EVENT", "BOGUS")
+
 
 class TestCheckRequiredColumns(unittest.TestCase):
 

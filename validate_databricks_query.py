@@ -36,11 +36,13 @@ _DATA_TYPES_WITH_IDENTITY = {"EVENT", "USER_PROPERTY", "WAREHOUSE_PROPERTY"}
 
 
 def _identity_columns(record_identity: str) -> set:
-    if record_identity == "USER_ID_AND_DEVICE_ID":
-        return {"user_id", "device_id"}
+    if record_identity == "USER_ID":
+        return {"user_id"}
     if record_identity == "DEVICE_ID":
         return {"device_id"}
-    return {"user_id"}  # USER_ID / default
+    if record_identity == "USER_ID_AND_DEVICE_ID":
+        return {"user_id", "device_id"}
+    raise ValueError(f"Unknown record_identity: {record_identity!r}")
 
 
 def required_columns_for(data_type: str, record_identity: str) -> set:
@@ -59,14 +61,43 @@ def check_required_columns(actual_columns, data_type: str, record_identity: str)
     return sorted(required_columns_for(data_type, record_identity) - actual)
 
 
-def _transform_sql(sql, versions, spark, ingestion_in_mutability_mode):
-    """Create a temp view per table at its end version and rewrite the SQL."""
+def _fetch_table(table, starting_version, ending_version, spark):
+    """Read a table the same way the unload job does: a version-as-of snapshot for an
+    initial import (start == 0), otherwise the change feed between the two versions."""
+    if starting_version == 0:
+        return spark.sql(f'select * from {table} version as of {ending_version}')
+    return spark.sql(
+        f'select * from table_changes("{table}", {starting_version}, {ending_version})'
+    )
+
+
+def _filter_change_data(df, data_type):
+    """Mirror the unload job's CDF row filter and metadata-column drop so the validated
+    temp views match production. No-op when the read produced no change-feed columns."""
+    from pyspark.sql.functions import col  # lazy: only needed on-cluster
+
+    if "_change_type" not in df.columns:
+        return df
+    if data_type == "EVENT":
+        df = df.filter(col("_change_type").isNull() | col("_change_type").eqNullSafe("insert"))
+    else:
+        df = df.filter(
+            col("_change_type").isNull()
+            | col("_change_type").eqNullSafe("insert")
+            | col("_change_type").eqNullSafe("update_postimage")
+        )
+    return df.drop("_commit_version", "_commit_timestamp", "_change_type")
+
+
+def _transform_sql(sql, versions, spark, data_type, ingestion_in_mutability_mode):
+    """Create a temp view per table (mirroring the unload job's read path: start/end
+    versions, change feed, and CDF filter) and rewrite the SQL to use the views."""
     transformed = sql
     for table, version_range in versions.items():
-        ending_version = version_range[1]
-        df = spark.sql(f"select * from {table} version as of {ending_version}")
-        if not ingestion_in_mutability_mode and "_change_type" in df.columns:
-            df = df.drop("_commit_version", "_commit_timestamp", "_change_type")
+        starting_version, ending_version = version_range[0], version_range[1]
+        df = _fetch_table(table, starting_version, ending_version, spark)
+        if not ingestion_in_mutability_mode:
+            df = _filter_change_data(df, data_type)
         view_name = build_temp_view_name(table)
         df.createOrReplaceTempView(view_name)
         transformed = replace_table_name_in_sql(transformed, table, view_name)
@@ -111,7 +142,7 @@ def main() -> int:
         "endVersion",
     )
 
-    transformed = _transform_sql(sql, versions, spark, args.ingestion_in_mutability_mode)
+    transformed = _transform_sql(sql, versions, spark, args.data_type, args.ingestion_in_mutability_mode)
     print("=== Transformed SQL (this is what the job runs) ===")
     print(transformed)
     print()
