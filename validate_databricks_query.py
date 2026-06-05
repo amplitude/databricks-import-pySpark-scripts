@@ -59,14 +59,38 @@ def check_required_columns(actual_columns, data_type: str, record_identity: str)
     return sorted(required_columns_for(data_type, record_identity) - actual)
 
 
-def _transform_sql(sql, versions, spark, ingestion_in_mutability_mode):
-    """Create a temp view per table at its end version and rewrite the SQL."""
+def _build_sql_to_query_table(table_full_name: str, starting_version: int, ending_version: int) -> str:
+    if starting_version == 0:
+        return f"select * from {table_full_name} version as of {ending_version}"
+    return f'select * from table_changes("{table_full_name}", {starting_version}, {ending_version})'
+
+
+def _filter_data(data_frame, data_type: str):
+    if "_change_type" in data_frame.columns:
+        if data_type == "EVENT":
+            data_frame = data_frame.filter(
+                data_frame["_change_type"].isNull()
+                | data_frame["_change_type"].eqNullSafe("insert")
+            )
+        else:
+            data_frame = data_frame.filter(
+                data_frame["_change_type"].isNull()
+                | data_frame["_change_type"].eqNullSafe("insert")
+                | data_frame["_change_type"].eqNullSafe("update_postimage")
+            )
+        data_frame = data_frame.drop("_commit_version", "_commit_timestamp", "_change_type")
+    return data_frame
+
+
+def _transform_sql(sql, versions, spark, data_type, ingestion_in_mutability_mode):
+    """Create production-equivalent temp views for each table and rewrite the SQL."""
     transformed = sql
     for table, version_range in versions.items():
+        starting_version = version_range[0]
         ending_version = version_range[1]
-        df = spark.sql(f"select * from {table} version as of {ending_version}")
-        if not ingestion_in_mutability_mode and "_change_type" in df.columns:
-            df = df.drop("_commit_version", "_commit_timestamp", "_change_type")
+        df = spark.sql(_build_sql_to_query_table(table, starting_version, ending_version))
+        if not ingestion_in_mutability_mode:
+            df = _filter_data(df, data_type)
         view_name = build_temp_view_name(table)
         df.createOrReplaceTempView(view_name)
         transformed = replace_table_name_in_sql(transformed, table, view_name)
@@ -106,12 +130,8 @@ def main() -> int:
     versions = parse_table_versions_map_arg(args.table_versions_map)
 
     spark = SparkSession.builder.getOrCreate()
-    spark.conf.set(
-        "spark.databricks.delta.changeDataFeed.defaultSchemaModeForColumnMappingTable",
-        "endVersion",
-    )
 
-    transformed = _transform_sql(sql, versions, spark, args.ingestion_in_mutability_mode)
+    transformed = _transform_sql(sql, versions, spark, args.data_type, args.ingestion_in_mutability_mode)
     print("=== Transformed SQL (this is what the job runs) ===")
     print(transformed)
     print()
