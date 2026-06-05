@@ -5,12 +5,26 @@ Status: Approved (pending spec review)
 
 ## Background
 
-This repo holds standalone PySpark scripts that Falcon uploads to a customer's
-Databricks workspace and runs as `SparkPythonTask` jobs to unload Delta table
-data to S3. Each script is self-contained (uploaded and executed independently),
-so shared helpers such as `replace_table_name_in_sql` are intentionally
-duplicated across scripts and guarded centrally by the substitution tests
-(`test/test_table_name_substitution.py`, `_MODULES_UNDER_TEST`).
+This repo holds PySpark scripts that Falcon runs as `SparkPythonTask` jobs on a
+customer's Databricks workspace to unload Delta table data to S3.
+
+**Deployment model (verified).** Falcon creates the Databricks job with
+`SparkPythonTask.setSource(Source.GIT)` and a `GitSource` pointing at
+`github.com/amplitude/databricks-import-pySpark-scripts` @ branch `main`
+(`DatabricksToS3WorkerJobExecutor.java:846` and `:879`). Databricks therefore
+checks out the **entire repo** and runs the entrypoint from within that checkout,
+so the repo root is on `sys.path` at runtime. Two consequences:
+
+- A sibling top-level module **can be imported** by the entrypoint scripts on the
+  cluster — no zip/wheel bundling needed.
+- Production jobs run off **`main`**, so the shared module and every entrypoint
+  that imports it must land on `main` together (single PR).
+
+Historically each script carried its own copy of helpers such as
+`replace_table_name_in_sql`, guarded centrally by the substitution tests
+(`test/test_table_name_substitution.py`, `_MODULES_UNDER_TEST`). Since the GIT
+deployment model makes sibling imports safe, this design replaces that
+duplication with a single shared module (see "Shared module" below).
 
 Two customer-facing problems motivate this work:
 
@@ -40,67 +54,87 @@ Two customer-facing problems motivate this work:
 ## Non-Goals
 
 - No changes to the Falcon (Java) side in this repo.
-- No refactor of the deliberate "each script is self-contained" deployment model.
 - No change to the unload write path / output format.
+- No extraction of the pyspark-dependent view-building/fetch/filter logic into the
+  shared module — only the pure (pyspark-free) SQL helpers are shared for now, to
+  keep scope tight and the local preview tool dependency-free.
 
 ---
 
-## Feature 1: Query-validation tool
+## Shared module: `databricks_sql_utils.py`
 
-**New standalone script:** `validate_databricks_query.py`, alongside the unload
-scripts. Self-contained, carries its own copy of the substitution/view helpers,
-and is added to `_MODULES_UNDER_TEST` in `test/test_table_name_substitution.py`
-so the substring-collision regression tests cover it too.
+A single, **pyspark-free** module at the repo root holding the pure helpers that
+every script and tool needs:
 
-### Inputs
+- `replace_table_name_in_sql` (+ `_IDENTIFIER_CHAR`) — the whole-identifier
+  table-name → temp-view substitution (the DWH-620 fix lives here).
+- `build_temp_view_name`
+- `parse_table_versions_map_arg`
 
-Same shape as the real job, so a customer can copy their job config:
+All entrypoints import from it and their local copies are deleted:
+`unload_databricks_data_to_s3.py`, `unload_databricks_data_to_s3_partition.py`,
+`TEST_unload_databricks_data_to_s3.py`, plus the two new tools below.
 
-- `--table_versions_map` — e.g. `cat.sch.t1=0-12,cat.sch.t2=10-100` (same parser
-  as the unload script).
+Keeping it pyspark-free means the local preview tool and the existing
+pyspark-stubbed unit tests import it with no Spark install. The
+pyspark-dependent logic (`build_views_for_tables`, `fetch_data`, `filter_data`)
+stays in the on-cluster scripts for now.
+
+Because production jobs run off `main` via GIT source, the shared module and all
+importing entrypoints must be merged to `main` in the same PR.
+
+---
+
+## Feature 1: Query inspection — two distinct tools
+
+The two use cases differ in everything — dependencies (none vs. full Spark + S3
+secrets), where they run (laptop vs. Databricks job), audience, and what
+"success" means ("here's the SQL" vs. "it parses and has the right columns").
+They are therefore **two separate scripts**, each with one clear purpose. Both
+import the shared `databricks_sql_utils.py`.
+
+Shared inputs (same shape as the real job, so a customer can copy their job
+config):
+
+- `--table_versions_map` — e.g. `cat.sch.t1=0-12,cat.sch.t2=10-100`.
 - `--data_type` — `EVENT` | `USER_PROPERTY` | `GROUP_PROPERTY` | `WAREHOUSE_PROPERTY`.
 - `--sql` or `--sql-file` — the transformation SQL (file option avoids shell
   quoting pain for large multi-line queries).
-- `--local` — offline mode flag (default is on-cluster).
-- `--sample N` — (on-cluster only) show N sample rows.
 
-### Mode: `--local` (offline, no Spark, no creds)
+### Tool A: `preview_databricks_query_sql.py` (local, offline)
+
+Pure string work; no pyspark, no creds — runs on a laptop with zero setup.
 
 - Applies the table → temp-view-name substitution and **prints the fully
-  transformed SQL** — the exact text the real run hands to `spark.sql()`.
+  transformed SQL** — the exact text the real run hands to `spark.sql()`. This is
+  the "see the real query being executed" ask.
 - Structural lint that needs no cluster:
   - balanced parentheses and quotes,
   - every table named in the SQL is present in `--table_versions_map` and vice
     versa (flags typo'd / missing table mappings),
   - the collapsed-line `--` comment hazard (a `--` line comment that, if newlines
     were ever stripped, would comment out the rest of the query).
-- pyspark is imported lazily so this mode runs on a laptop with no Spark install
-  (the substitution logic is pure string manipulation, consistent with how the
-  existing tests stub pyspark).
+- Exit `0` = clean, non-zero = lint finding.
 
-### Mode: on-cluster (default — run as a `SparkPythonTask`, like the real job)
+### Tool B: `validate_databricks_query.py` (on-cluster, runs as a `SparkPythonTask`)
 
-- Everything `--local` prints, **plus**:
-  - creates the temp views for each table at the requested versions,
-  - calls `spark.sql(transformed_sql)` and reads `.schema` — this triggers
-    Spark's parse + analysis **without writing anything to S3**,
-  - prints the resolved output schema (column names + types),
-  - runs a **required-column check** per `data_type`:
-    - `EVENT` → `event_type`, `time`, and (`user_id` or `device_id`)
-    - `USER_PROPERTY` / `GROUP_PROPERTY` / `WAREHOUSE_PROPERTY` → their respective
-      required keys
-    - **NOTE:** exact required-column sets to be confirmed against Falcon's
-      ingestion contract before finalizing.
-  - A missing required column produces a clear FAIL naming the column (this is
-    what would have surfaced the customer's "no event_type" report).
-- `--sample N`: `.limit(N).show()` so the customer can eyeball real rows. There
-  is no write path in this tool under any flag.
+Runs like the real job but read-only — never writes to S3.
 
-### Output / exit codes
-
-- Human-readable sections: transformed SQL, lint findings, schema, required-column
-  result, optional sample.
-- Exit code `0` = pass, non-zero = validation failure (CI-friendly).
+- Creates the temp views for each table at the requested versions.
+- Calls `spark.sql(transformed_sql)` and reads `.schema` — triggers Spark's
+  parse + analysis **without materializing/writing** anything. This is what would
+  have surfaced the customer's "no event_type" / comment problem for real.
+- Prints the resolved output schema (column names + types).
+- Runs a **required-column check** per `data_type`:
+  - `EVENT` → `event_type`, `time`, and (`user_id` or `device_id`)
+  - `USER_PROPERTY` / `GROUP_PROPERTY` / `WAREHOUSE_PROPERTY` → their respective
+    required keys
+  - **NOTE:** exact required-column sets to be confirmed against Falcon's
+    ingestion contract before finalizing.
+- A missing required column produces a clear FAIL naming the column.
+- `--sample N`: `.limit(N).show()` so the customer can eyeball real rows. No write
+  path exists in this tool under any flag.
+- Exit `0` = pass, non-zero = validation failure (CI-friendly).
 
 ---
 
@@ -158,27 +192,39 @@ actual recovery on the Spark side rather than error labeling.
 
 `README.md` (currently two lines) gains a usage section documenting:
 
-- the validation tool: both modes, all flags, and copy-paste examples,
-- the resilience behavior: what the `endVersion` conf does and when a table is
+- **Preview your SQL locally** (`preview_databricks_query_sql.py`): flags and a
+  copy-paste example.
+- **Validate against your cluster** (`validate_databricks_query.py`): flags,
+  example, and the read-only / no-write guarantee.
+- **Resilience behavior**: what the `endVersion` conf does and when a table is
   auto-retried latest-only (and the data-skipping implication).
 
 ---
 
 ## Testing
 
-- `test/test_table_name_substitution.py`: add `validate_databricks_query` to
-  `_MODULES_UNDER_TEST` so the substring-collision regression covers it.
+- `test/test_table_name_substitution.py`: simplified to test the single shared
+  `databricks_sql_utils.replace_table_name_in_sql` directly (the `_MODULES_UNDER_TEST`
+  fan-out across per-script copies is removed, since there is now one copy).
 - New unit tests (pyspark-stubbed, like the existing pure-helper tests):
   - `extract_incompatible_schema_error_signature` matches both error codes and
     returns `None` otherwise,
-  - the validation tool's local-mode substitution output and required-column
-    check (pass and fail cases per `data_type`).
+  - `preview_databricks_query_sql.py`: transformed-SQL output and each lint check
+    (balanced parens/quotes, table-map mismatch, `--`-comment hazard),
+  - `validate_databricks_query.py`: the required-column check (pass and fail cases
+    per `data_type`) exercised against an in-memory schema, with pyspark stubbed.
 
 ## Affected files
 
-- `validate_databricks_query.py` (new)
-- `unload_databricks_data_to_s3.py` (resilience)
-- `unload_databricks_data_to_s3_partition.py` (resilience)
-- `test/test_table_name_substitution.py` (add new module to coverage)
-- `test/` new resilience + validation tests
+- `databricks_sql_utils.py` (new — shared pyspark-free helpers)
+- `preview_databricks_query_sql.py` (new — local preview tool)
+- `validate_databricks_query.py` (new — on-cluster validation tool)
+- `unload_databricks_data_to_s3.py` (import shared module; resilience)
+- `unload_databricks_data_to_s3_partition.py` (import shared module; resilience)
+- `TEST_unload_databricks_data_to_s3.py` (import shared module — delete local copy)
+- `test/test_table_name_substitution.py` (point at the shared module)
+- `test/` new resilience + preview + validation tests
 - `README.md` (usage docs)
+
+All of the above ship in **one PR to `main`** (GIT-source deployment requires the
+shared module and its importers to be present together).
