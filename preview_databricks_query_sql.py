@@ -82,7 +82,7 @@ def lint_sql(sql: str, table_to_version_range: dict[str, list[int]]) -> list[str
     # A '--' line comment is fine on its own line, but if newlines were ever
     # stripped upstream it would comment out the rest of the query. Warn so the
     # customer is aware of the fragility.
-    if re.search(r"--", sql):
+    if re.search(r"(?m)(^|\s)--", sql):
         findings.append(
             "SQL contains '--' line comments; these rely on newlines surviving. "
             "Prefer /* ... */ block comments to avoid accidental truncation."
@@ -115,6 +115,12 @@ def main() -> int:
             print(f"Could not read --sql-file '{args.sql_file}': {error}", file=sys.stderr)
             return 2
     versions = parse_table_versions_map_arg(args.table_versions_map)
+    if args.data_type is not None:
+        print(
+            f"[info] --data_type {args.data_type} is informational in preview mode; "
+            "required-column validation is done by validate_databricks_query.py."
+        )
+        print()
 
     print("=== Transformed SQL (this is what the job runs) ===")
     print(transform_sql(sql, versions))

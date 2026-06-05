@@ -54,3 +54,8 @@ class TestCheckRequiredColumns(unittest.TestCase):
             ["event_properties", "time", "user_id"], "EVENT", "USER_ID",
         )
         self.assertEqual(["event_type"], missing)
+
+    def test_group_property_has_no_identity_requirement(self):
+        # GROUP_PROPERTY keys on `groups` and requires no identity column.
+        missing = check_required_columns(["groups"], "GROUP_PROPERTY", "USER_ID")
+        self.assertEqual([], missing)

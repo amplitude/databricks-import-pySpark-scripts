@@ -45,6 +45,8 @@ def _identity_columns(record_identity: str) -> set:
 
 def required_columns_for(data_type: str, record_identity: str) -> set:
     """Required output columns for a data type, mirroring Falcon's RequiredColumnsRule."""
+    if data_type not in _BASE_REQUIRED:
+        raise ValueError(f"Unknown data_type: {data_type!r}")
     required = set(_BASE_REQUIRED[data_type])
     if data_type in _DATA_TYPES_WITH_IDENTITY:
         required |= _identity_columns(record_identity)
