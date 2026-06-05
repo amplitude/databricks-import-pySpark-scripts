@@ -154,6 +154,11 @@ if __name__ == '__main__':
     args, unknown = parser.parse_known_args()
 
     spark = SparkSession.builder.getOrCreate()
+    # Read Delta Change Data Feed using the END-version schema when a column-mapping
+    # table's schema changed across the requested version range. Without this, CDF
+    # reads fail with DELTA_CHANGE_DATA_FEED_INCOMPATIBLE_DATA_SCHEMA / _SCHEMA_CHANGE
+    # on otherwise-compatible (e.g. additive) schema changes.
+    spark.conf.set("spark.databricks.delta.changeDataFeed.defaultSchemaModeForColumnMappingTable", "endVersion")
     # setup s3 credentials for data export
     aws_access_key = dbutils.secrets.get(scope=args.secret_scope, key=args.secret_key_name_for_aws_access_key)
     aws_secret_key = dbutils.secrets.get(scope=args.secret_scope, key=args.secret_key_name_for_aws_secret_key)
