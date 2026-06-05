@@ -92,18 +92,20 @@ def extract_missing_cdf_error_signature(error: Exception) -> Optional[str]:
         return SPARK_DBR_FILE_NOT_EXIST_SIGNATURE
     return None
 
-def extract_incompatible_schema_error_signature(error: Exception) -> Optional[str]:
+def extract_incompatible_schema_error_signature(error: Optional[BaseException]) -> Optional[str]:
     """
     Return a signature string if the exception indicates a Delta CDF incompatible
-    schema change across the requested [start, end] version range.
+    schema change between the requested starting and ending versions.
 
     Databricks surfaces this under two codes depending on DBR/Delta version:
       - DELTA_CHANGE_DATA_FEED_INCOMPATIBLE_DATA_SCHEMA: broader incompatibility,
         seen on DBR 15+ column-mapping tables (e.g. reading CDF from a checkpoint
         whose schema differs from the current table schema).
       - DELTA_CHANGE_DATA_FEED_INCOMPATIBLE_SCHEMA_CHANGE: column-mapping renames.
-    Both are unrecoverable for the [start, end) range; the caller recovers by
-    re-reading the table at end-version only (latest-only).
+    The change feed for that starting-to-ending span is unrecoverable; the caller
+    recovers by re-reading the table at the ending version only (latest-only).
+
+    Accepts None (returns None) so callers can pass an optional/absent error.
     """
     message = str(error) if error else ""
     if not message:
