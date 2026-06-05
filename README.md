@@ -55,6 +55,11 @@ prints the resolved schema, and verifies the required columns for the data type:
 `USER_ID` → `user_id`, `DEVICE_ID` → `device_id`, `USER_ID_AND_DEVICE_ID` → both.
 Exit code is non-zero if a required column is missing.
 
+`--end_version_schema_mode` (off by default) sets
+`spark.databricks.delta.changeDataFeed.defaultSchemaModeForColumnMappingTable=endVersion`
+before validating, to mirror the unload job's CDF schema-resilience behavior. Leave
+it off to validate against the cluster's own defaults.
+
 ## Tests
 
     python3 -m unittest discover -s test -v

@@ -118,6 +118,11 @@ def main() -> int:
                         choices=["USER_ID", "DEVICE_ID", "USER_ID_AND_DEVICE_ID"],
                         help="record-identity setting of the pipeline (default USER_ID)")
     parser.add_argument("--ingestion_in_mutability_mode", action="store_true", default=False)
+    parser.add_argument("--end_version_schema_mode", action="store_true", default=False,
+                        help="set spark.databricks.delta.changeDataFeed."
+                             "defaultSchemaModeForColumnMappingTable=endVersion before validating, to mirror the "
+                             "unload job's CDF schema-resilience behavior. Off by default so validation reflects the "
+                             "cluster's own defaults rather than silently applying a conf the unload may not set.")
     parser.add_argument("--sample", type=int, default=0,
                         help="if > 0, show this many sample rows (read-only)")
     group = parser.add_mutually_exclusive_group(required=True)
@@ -137,10 +142,11 @@ def main() -> int:
     versions = parse_table_versions_map_arg(args.table_versions_map)
 
     spark = SparkSession.builder.getOrCreate()
-    spark.conf.set(
-        "spark.databricks.delta.changeDataFeed.defaultSchemaModeForColumnMappingTable",
-        "endVersion",
-    )
+    if args.end_version_schema_mode:
+        spark.conf.set(
+            "spark.databricks.delta.changeDataFeed.defaultSchemaModeForColumnMappingTable",
+            "endVersion",
+        )
 
     transformed = _transform_sql(sql, versions, spark, args.data_type, args.ingestion_in_mutability_mode)
     print("=== Transformed SQL (this is what the job runs) ===")
