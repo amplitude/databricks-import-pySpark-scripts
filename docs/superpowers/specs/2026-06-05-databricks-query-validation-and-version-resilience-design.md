@@ -125,12 +125,20 @@ Runs like the real job but read-only — never writes to S3.
   parse + analysis **without materializing/writing** anything. This is what would
   have surfaced the customer's "no event_type" / comment problem for real.
 - Prints the resolved output schema (column names + types).
-- Runs a **required-column check** per `data_type`:
-  - `EVENT` → `event_type`, `time`, and (`user_id` or `device_id`)
-  - `USER_PROPERTY` / `GROUP_PROPERTY` / `WAREHOUSE_PROPERTY` → their respective
-    required keys
-  - **NOTE:** exact required-column sets to be confirmed against Falcon's
-    ingestion contract before finalizing.
+- Runs a **required-column check** per `data_type`, mirroring Falcon's
+  `RequiredColumnsRule` (`SQLTestSuite*Import.java`, `SQLUtils`):
+  - `EVENT` → `event_type`, `event_properties`, `time` + identity
+  - `USER_PROPERTY` → `user_properties` + identity
+  - `GROUP_PROPERTY` → `groups` (no identity columns)
+  - `WAREHOUSE_PROPERTY` → identity only
+  - **identity** depends on the pipeline's record-identity setting
+    (`SQLTestSuite.addRequiredIdentityColumns`): `USER_ID` → `user_id` (default),
+    `DEVICE_ID` → `device_id`, `USER_ID_AND_DEVICE_ID` → both. The tool exposes an
+    optional `--record-identity {USER_ID,DEVICE_ID,USER_ID_AND_DEVICE_ID}`
+    (default `USER_ID`) so it matches the customer's pipeline config.
+  - Note: the time-strategy `timestampColumn` requirement
+    (`TIMESTAMP`/`MAX_TIMESTAMP` strategies) is pipeline config the tool does not
+    receive, so it is intentionally out of scope for this check.
 - A missing required column produces a clear FAIL naming the column.
 - `--sample N`: `.limit(N).show()` so the customer can eyeball real rows. No write
   path exists in this tool under any flag.
@@ -140,9 +148,24 @@ Runs like the real job but read-only — never writes to S3.
 
 ## Feature 2: Version/schema resilience in the unload scripts
 
-Applies to both production unload scripts: `unload_databricks_data_to_s3.py` and
-`unload_databricks_data_to_s3_partition.py`. The `TEST_unload_databricks_data_to_s3.py`
-canary script is intentionally left unchanged.
+**Scope clarified during planning.** The two parts land in different scripts
+because the scripts have different structure:
+
+- **(a) Preventive conf** → both `unload_databricks_data_to_s3.py` **and**
+  `unload_databricks_data_to_s3_partition.py`. It is a single, safe line and
+  applies regardless of the rest of the script.
+- **(b) Recovery retry** → `unload_databricks_data_to_s3.py` **only**. The
+  recovery machinery (`build_views_for_tables`, `extract_missing_cdf_error_signature`,
+  the top-level latest-only retry) exists **only** in this script. The partition
+  script (`...partition.py:169-203`) uses a simpler inline loop with no fallback
+  scaffolding, and is **not referenced by the Falcon executor** (which wires only
+  `unload_databricks_data_to_s3.py` and `TEST_unload_databricks_data_to_s3.py`,
+  per `DatabricksToS3WorkerJobExecutor.java:122-123`). Porting the full retry
+  machinery into the partition script is out of scope (YAGNI); it still gets the
+  preventive conf.
+
+The `TEST_unload_databricks_data_to_s3.py` canary script gets only the shared-module
+import refactor — no resilience changes.
 
 ### (a) Preventive — Spark conf at session setup
 
@@ -160,7 +183,7 @@ column-mapping schema change, transparently fixing the common
 `DELTA_CHANGE_DATA_FEED_INCOMPATIBLE_DATA_SCHEMA` case for compatible/additive
 changes — no customer cluster configuration required.
 
-### (b) Recovery — extend the existing latest-only fallback
+### (b) Recovery — extend the existing latest-only fallback (`unload_databricks_data_to_s3.py` only)
 
 The script already recovers from missing CDF files via
 `extract_missing_cdf_error_signature` driving a latest-only (`start=end=end_version`)
@@ -219,8 +242,8 @@ actual recovery on the Spark side rather than error labeling.
 - `databricks_sql_utils.py` (new — shared pyspark-free helpers)
 - `preview_databricks_query_sql.py` (new — local preview tool)
 - `validate_databricks_query.py` (new — on-cluster validation tool)
-- `unload_databricks_data_to_s3.py` (import shared module; resilience)
-- `unload_databricks_data_to_s3_partition.py` (import shared module; resilience)
+- `unload_databricks_data_to_s3.py` (import shared module; resilience conf + retry)
+- `unload_databricks_data_to_s3_partition.py` (import shared module; resilience conf only)
 - `TEST_unload_databricks_data_to_s3.py` (import shared module — delete local copy)
 - `test/test_table_name_substitution.py` (point at the shared module)
 - `test/` new resilience + preview + validation tests
