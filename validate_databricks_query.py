@@ -17,6 +17,7 @@ identity depends on the pipeline's record-identity setting:
     USER_ID_AND_DEVICE_ID -> user_id + device_id
 """
 import argparse
+import sys
 
 from databricks_sql_utils import (
     parse_table_versions_map_arg,
@@ -56,10 +57,8 @@ def check_required_columns(actual_columns, data_type: str, record_identity: str)
     return sorted(required_columns_for(data_type, record_identity) - actual)
 
 
-def _transform_sql(sql, versions, spark, data_type, ingestion_in_mutability_mode):
+def _transform_sql(sql, versions, spark, ingestion_in_mutability_mode):
     """Create a temp view per table at its end version and rewrite the SQL."""
-    from pyspark.sql.functions import col  # lazy: only needed on-cluster
-
     transformed = sql
     for table, version_range in versions.items():
         ending_version = version_range[1]
@@ -93,7 +92,15 @@ def main() -> int:
     group.add_argument("--sql-file", help="path to a file containing the transformation SQL")
     args, _ = parser.parse_known_args()
 
-    sql = args.sql if args.sql is not None else open(args.sql_file, "r").read()
+    if args.sql is not None:
+        sql = args.sql
+    else:
+        try:
+            with open(args.sql_file, "r") as sql_file:
+                sql = sql_file.read()
+        except OSError as error:
+            print(f"Could not read --sql-file '{args.sql_file}': {error}", file=sys.stderr)
+            return 2
     versions = parse_table_versions_map_arg(args.table_versions_map)
 
     spark = SparkSession.builder.getOrCreate()
@@ -102,7 +109,7 @@ def main() -> int:
         "endVersion",
     )
 
-    transformed = _transform_sql(sql, versions, spark, args.data_type, args.ingestion_in_mutability_mode)
+    transformed = _transform_sql(sql, versions, spark, args.ingestion_in_mutability_mode)
     print("=== Transformed SQL (this is what the job runs) ===")
     print(transformed)
     print()
