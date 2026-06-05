@@ -14,6 +14,7 @@ Example:
 """
 import argparse
 import re
+import sys
 
 from databricks_sql_utils import (
     parse_table_versions_map_arg,
@@ -44,7 +45,14 @@ def _is_balanced(sql: str, open_char: str, close_char: str) -> bool:
 
 
 def lint_sql(sql: str, table_to_version_range: dict[str, list[int]]) -> list[str]:
-    """Return a list of human-readable warnings; empty list means clean."""
+    r"""Return a list of human-readable warnings; empty list means clean.
+
+    These are heuristic text checks, not a SQL parser. They can produce false
+    positives (e.g. a '--' or unbalanced quote inside a string literal) and false
+    negatives (e.g. a backtick-quoted ``\`cat.sch.t\``` table reference is not
+    detected by the in-map/referenced cross-check). They are meant as a quick
+    sanity pass, not a guarantee of validity.
+    """
     findings: list[str] = []
 
     if not _is_balanced(sql, "(", ")"):
@@ -97,7 +105,15 @@ def main() -> int:
     group.add_argument("--sql-file", help="path to a file containing the transformation SQL")
     args, _ = parser.parse_known_args()
 
-    sql = args.sql if args.sql is not None else open(args.sql_file, "r").read()
+    if args.sql is not None:
+        sql = args.sql
+    else:
+        try:
+            with open(args.sql_file, "r") as sql_file:
+                sql = sql_file.read()
+        except OSError as error:
+            print(f"Could not read --sql-file '{args.sql_file}': {error}", file=sys.stderr)
+            return 2
     versions = parse_table_versions_map_arg(args.table_versions_map)
 
     print("=== Transformed SQL (this is what the job runs) ===")
