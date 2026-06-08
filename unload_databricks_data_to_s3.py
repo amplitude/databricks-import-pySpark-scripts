@@ -24,6 +24,10 @@ MAX_RECORDS_PER_OUTPUT_FILE: int = 100_000
 
 MISSING_CDF_FILE_ERROR_SIGNATURE = "DELTA_CHANGE_DATA_FILE_NOT_FOUND"
 SPARK_DBR_FILE_NOT_EXIST_SIGNATURE = "FAILED_READ_FILE.DBR_FILE_NOT_EXIST"
+INCOMPATIBLE_SCHEMA_ERROR_SIGNATURES = (
+    "DELTA_CHANGE_DATA_FEED_INCOMPATIBLE_DATA_SCHEMA",
+    "DELTA_CHANGE_DATA_FEED_INCOMPATIBLE_SCHEMA_CHANGE",
+)
 
 LOG_MESSAGES: list[str] = []
 
@@ -86,6 +90,29 @@ def extract_missing_cdf_error_signature(error: Exception) -> Optional[str]:
         return MISSING_CDF_FILE_ERROR_SIGNATURE
     if SPARK_DBR_FILE_NOT_EXIST_SIGNATURE in message:
         return SPARK_DBR_FILE_NOT_EXIST_SIGNATURE
+    return None
+
+def extract_incompatible_schema_error_signature(error: Optional[BaseException]) -> Optional[str]:
+    """
+    Return a signature string if the exception indicates a Delta CDF incompatible
+    schema change between the requested starting and ending versions.
+
+    Databricks surfaces this under two codes depending on DBR/Delta version:
+      - DELTA_CHANGE_DATA_FEED_INCOMPATIBLE_DATA_SCHEMA: broader incompatibility,
+        seen on DBR 15+ column-mapping tables (e.g. reading CDF from a checkpoint
+        whose schema differs from the current table schema).
+      - DELTA_CHANGE_DATA_FEED_INCOMPATIBLE_SCHEMA_CHANGE: column-mapping renames.
+    The change feed for that starting-to-ending span is unrecoverable; the caller
+    recovers by re-reading the table at the ending version only (latest-only).
+
+    Accepts None (returns None) so callers can pass an optional/absent error.
+    """
+    message = str(error) if error else ""
+    if not message:
+        return None
+    for signature in INCOMPATIBLE_SCHEMA_ERROR_SIGNATURES:
+        if signature in message:
+            return signature
     return None
 
 def _drop_nulltype_fields(col: Column, dtype: DataType) -> Column:
@@ -360,12 +387,15 @@ def build_views_for_tables(
             view_name = _fetch_and_create_view(starting_version, ending_version)
             sql_local = replace_table_name_in_sql(sql_local, table, view_name)
         except Exception as fetch_error:
-            fallback_signature = extract_missing_cdf_error_signature(fetch_error)
+            fallback_signature = (
+                extract_missing_cdf_error_signature(fetch_error)
+                or extract_incompatible_schema_error_signature(fetch_error)
+            )
             if fallback_signature is None:
-                # propagate non-CDF errors
+                # propagate errors we cannot recover by reading latest-only
                 raise
             log_info(
-                f"Encountered missing CDF files for {table} (signature={fallback_signature}). "
+                f"Encountered recoverable CDF error for {table} (signature={fallback_signature}). "
                 f"Skipping versions {table_results[table]['initialStartVersion']}-{table_results[table]['initialEndVersion'] - 1} and re-reading at last known good version {ending_version}."
             )
             table_results[table]["initialFetchError"] = str(fetch_error)
@@ -521,6 +551,11 @@ if __name__ == '__main__':
     log_info("Starting Databricks unload job")
 
     spark = SparkSession.builder.getOrCreate()
+    # Read Delta Change Data Feed using the END-version schema when a column-mapping
+    # table's schema changed across the requested version range. Without this, CDF
+    # reads fail with DELTA_CHANGE_DATA_FEED_INCOMPATIBLE_DATA_SCHEMA / _SCHEMA_CHANGE
+    # on otherwise-compatible (e.g. additive) schema changes.
+    spark.conf.set("spark.databricks.delta.changeDataFeed.defaultSchemaModeForColumnMappingTable", "endVersion")
     # setup s3 credentials for data export
     aws_access_key = dbutils.secrets.get(scope=args.secret_scope, key=args.secret_key_name_for_aws_access_key)
     aws_secret_key = dbutils.secrets.get(scope=args.secret_scope, key=args.secret_key_name_for_aws_secret_key)
@@ -551,12 +586,15 @@ if __name__ == '__main__':
             force_latest_only=False,
         )
     except Exception as e:
-        sig = extract_missing_cdf_error_signature(e)
+        sig = (
+            extract_missing_cdf_error_signature(e)
+            or extract_incompatible_schema_error_signature(e)
+        )
         if sig is None:
-            # non-CDF error: re-raise immediately
+            # error we cannot recover by reading latest-only: re-raise
             raise
         log_info(
-            f"Failed with CDF missing-file signature ({sig}). "
+            f"Failed with recoverable CDF signature ({sig}). "
             f"Retrying with latest-only (start=end=end_version) for all tables."
         )
         # If we get a CDF error, retry with only the latest version for all tables any exception should propagate
