@@ -379,7 +379,7 @@ def _is_sensitive_attribute(name: str) -> bool:
                 if segments[index : index + len(part_segments)] == part_segments:
                     return True
             continue
-        if any(part in segment for segment in segments):
+        if any(part == segment for segment in segments):
             return True
     return False
 
