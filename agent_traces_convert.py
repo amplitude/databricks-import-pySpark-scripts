@@ -367,7 +367,21 @@ def _otlp_any_value(value: Any) -> Mapping[str, Any]:
 
 def _is_sensitive_attribute(name: str) -> bool:
     lowered = name.lower()
-    return any(part in lowered for part in _SENSITIVE_KEY_PARTS)
+    segments = re.split(r"[.\[\]]+", lowered)
+    for part in _SENSITIVE_KEY_PARTS:
+        if part in ("request", "response"):
+            if segments and segments[-1] == part:
+                return True
+            continue
+        if "." in part:
+            part_segments = part.split(".")
+            for index in range(len(segments) - len(part_segments) + 1):
+                if segments[index : index + len(part_segments)] == part_segments:
+                    return True
+            continue
+        if any(part in segment for segment in segments):
+            return True
+    return False
 
 
 def _otlp_attributes(
