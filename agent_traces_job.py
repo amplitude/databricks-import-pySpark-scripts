@@ -105,6 +105,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
+        "--protocol",
+        choices=tuple(item.value for item in Protocol),
+        help="Delivery protocol override (default inferred from source format)",
+    )
+    parser.add_argument(
         "--result-path",
         help="Optional dbutils/local path for the machine-readable run result",
     )
