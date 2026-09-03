@@ -242,10 +242,11 @@ def _post_json(
     attempts = 0
     while True:
         attempts += 1
-        request = urllib.request.Request(
+        request = urllib.request.Request(  # nosemgrep: ssrf-outbound-http-requires-safe-wrapper
             url, data=encoded, headers=request_headers, method="POST"
         )
         try:
+            # nosemgrep: ssrf-outbound-http-requires-safe-wrapper - OTLP ingest URL from Falcon job config
             with urllib.request.urlopen(
                 request, timeout=config.request_timeout_seconds
             ) as response:
