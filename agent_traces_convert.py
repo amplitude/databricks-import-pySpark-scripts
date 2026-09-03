@@ -70,6 +70,7 @@ _SENSITIVE_AGENT_PROPERTIES = {
 _SENSITIVE_KEY_PARTS = (
     "attachment",
     "content",
+    "completion",
     "input.value",
     "input_state",
     "inputs",
@@ -482,7 +483,7 @@ def _convert_span(
     span = normalize(raw_span)
     trace_id = span.get("trace_id", span.get("traceId", fallback_trace_id))
     span_id = span.get("span_id", span.get("spanId"))
-    parent_id = span.get("parent_span_id", span.get("parentSpanId"))
+    parent_id = span.get("parent_span_id", span.get("parentSpanId", span.get("parent_id")))
     start = span.get(
         "start_time_unix_nano",
         span.get("startTimeUnixNano", span.get("start_time")),
