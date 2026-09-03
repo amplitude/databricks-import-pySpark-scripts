@@ -270,6 +270,8 @@ def _convert_mapped(row: Mapping[str, Any], config: ConversionConfig) -> List[Co
     # neither synthesize nor replay it.
     if event.get("event_type") == _SESSION_END:
         return []
+    if "time" in event:
+        event["time"] = _http_v2_time(event["time"])
     if config.named_format:
         properties = event.setdefault("event_properties", {})
         if isinstance(properties, dict):
@@ -309,6 +311,27 @@ def _to_hex_id(value: Any, byte_length: int, field_name: str) -> str:
             "{} must be a {}-character hexadecimal value".format(field_name, required_length)
         )
     return text
+
+
+def _http_v2_time(value: Any, field_name: str = "time") -> int:
+    if value is None:
+        raise ConversionError("{} is required".format(field_name))
+    if isinstance(value, dt.datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=dt.timezone.utc)
+        return int(value.timestamp() * 1000)
+    if isinstance(value, (int, float)):
+        return int(value)
+    text = str(value).strip()
+    if re.match(r"^-?\d+$", text):
+        return int(text)
+    try:
+        parsed = dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        raise ConversionError("{} is not a timestamp: {!r}".format(field_name, value))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    return int(parsed.timestamp() * 1000)
 
 
 def _unix_nanos(value: Any, field_name: str) -> str:
