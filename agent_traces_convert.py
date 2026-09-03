@@ -17,7 +17,27 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 
 class ConversionError(ValueError):
-    """A source record cannot be converted without losing required identity."""
+    """A source record cannot be converted without losing required identity.
+
+    ``reason`` is a stable machine-readable bucket so the job can report
+    skip counts per cause.  Falcon's shared converter may later return a
+    structured outcome object instead of raising; both shapes carry the same
+    reason vocabulary documented in ``SKIP_REASONS``.
+    """
+
+    def __init__(self, message: str, reason: str = "invalid_record") -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
+SKIP_REASONS = (
+    "missing_session_id",
+    "missing_identity",
+    "invalid_event_type",
+    "invalid_timestamp",
+    "invalid_record",
+    "filtered_event",
+)
 
 
 class SourceFormat(str, enum.Enum):
@@ -40,8 +60,10 @@ class ConversionConfig:
     source_format: SourceFormat
     mapping: Optional[Mapping[str, Any]] = None
     named_format: Optional[str] = None
-    content_mode: ContentMode = ContentMode.METADATA_ONLY
+    content_mode: ContentMode = ContentMode.FULL
     strict_essentials: bool = True
+    redact_pii: bool = True
+    custom_redaction_patterns: Tuple[str, ...] = ()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -55,9 +77,11 @@ _MISSING = object()
 _AGENT_ID = "[Agent] Agent ID"
 _TRACE_ID = "[Agent] Trace ID"
 _SPAN_ID = "[Agent] Span ID"
+_SESSION_ID = "[Agent] Session ID"
 _SESSION_END = "[Agent] Session End"
 
 _SENSITIVE_AGENT_PROPERTIES = {
+    "$llm_message",
     "[Agent] Attachments",
     "[Agent] Input State",
     "[Agent] Output State",
@@ -84,6 +108,24 @@ _SENSITIVE_KEY_PARTS = (
     "response",
     "tool.arguments",
     "tool.result",
+)
+_REDACTED_BASE64 = "[base64 image redacted]"
+_BUILTIN_REDACTIONS = (
+    (r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b", "[email]"),
+    (r"\b\(?([0-9]{3})\)?[-. ]?([0-9]{3})[-. ]?([0-9]{4})\b", "[phone]"),
+    (r"\b(?:\d{4}[-\s]?){3}\d{4}\b", "[credit_card]"),
+    (r"\b\d{3}(?:-| )\d{2}(?:-| )\d{4}\b", "[ssn]"),
+    (r"\b\d{1,3}(?:\.\d{1,3}){3}\b", "[ip_address]"),
+    (
+        r"(?<=//)\[::(?:[0-9a-fA-F]{1,4}:){0,5}[0-9a-fA-F]{1,4}\]"
+        r"|(?<=//)\[::1\]"
+        r"|\b(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\b"
+        r"|\b(?:[0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}\b"
+        r"|(?<![^\s])::(?:[0-9a-fA-F]{1,4}:){0,5}[0-9a-fA-F]{1,4}\b"
+        r"|(?<![^\s])::1\b",
+        "[ip_address]",
+    ),
+    (r"(?<!\w)\+[1-9]\d{6,14}\b", "[phone]"),
 )
 
 
@@ -124,6 +166,60 @@ def canonical_json(value: Any) -> str:
         ensure_ascii=False,
         default=_json_default,
     )
+
+
+def validate_redaction_patterns(patterns: Sequence[str]) -> Tuple[str, ...]:
+    """Validate customer regexes once on the driver before Spark execution."""
+    output = []
+    for pattern in patterns:
+        if not isinstance(pattern, str):
+            raise ConversionError("custom redaction patterns must be strings")
+        try:
+            re.compile(pattern)
+        except re.error as exc:
+            raise ConversionError(
+                "invalid custom redaction regex {!r}: {}".format(pattern, exc)
+            )
+        output.append(pattern)
+    return tuple(output)
+
+
+def _is_raw_base64(text: str) -> bool:
+    if len(text) <= 20 or len(text) % 4 != 0:
+        return False
+    if not re.search(r"[+/=]", text):
+        return False
+    return bool(re.match(r"^[A-Za-z0-9+/]+=*$", text))
+
+
+def _redact_text(
+    text: str, redact_pii: bool, custom_patterns: Sequence[str]
+) -> str:
+    if redact_pii:
+        if re.match(r"^data:[^;]+;base64,", text) or _is_raw_base64(text):
+            return _REDACTED_BASE64
+        for pattern, replacement in _BUILTIN_REDACTIONS:
+            text = re.sub(pattern, replacement, text)
+    for pattern in custom_patterns:
+        text = re.sub(pattern, "[REDACTED]", text)
+    return text
+
+
+def _redact_content(
+    value: Any, redact_pii: bool, custom_patterns: Sequence[str]
+) -> Any:
+    if isinstance(value, str):
+        return _redact_text(value, redact_pii, custom_patterns)
+    if isinstance(value, Mapping):
+        return {
+            key: _redact_content(item, redact_pii, custom_patterns)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [
+            _redact_content(item, redact_pii, custom_patterns) for item in value
+        ]
+    return value
 
 
 def stable_insert_id(event: Mapping[str, Any]) -> str:
@@ -245,11 +341,18 @@ def _metadata_only_event(event: Dict[str, Any]) -> None:
 def _validate_http_event(event: Mapping[str, Any], strict: bool) -> None:
     event_type = event.get("event_type")
     if not isinstance(event_type, str) or not event_type.startswith("[Agent] "):
-        raise ConversionError("event_type must be a canonical '[Agent] ...' event")
+        raise ConversionError(
+            "event_type must be a canonical '[Agent] ...' event",
+            reason="invalid_event_type",
+        )
     if event_type == _SESSION_END:
-        raise ConversionError("[Agent] Session End must not be imported")
+        raise ConversionError(
+            "[Agent] Session End must not be imported", reason="invalid_event_type"
+        )
     if not event.get("user_id") and not event.get("device_id"):
-        raise ConversionError("HTTP V2 event requires user_id or device_id")
+        raise ConversionError(
+            "HTTP V2 event requires user_id or device_id", reason="missing_identity"
+        )
     if not strict:
         return
     properties = event.get("event_properties")
@@ -280,6 +383,16 @@ def _convert_mapped(row: Mapping[str, Any], config: ConversionConfig) -> List[Co
             properties.setdefault("[Agent] Source Format", config.named_format)
     if config.content_mode == ContentMode.METADATA_ONLY:
         _metadata_only_event(event)
+    elif config.content_mode == ContentMode.FULL:
+        properties = event.get("event_properties")
+        if isinstance(properties, dict):
+            for key in _SENSITIVE_AGENT_PROPERTIES:
+                if key in properties:
+                    properties[key] = _redact_content(
+                        properties[key],
+                        config.redact_pii,
+                        config.custom_redaction_patterns,
+                    )
     _validate_http_event(event, config.strict_essentials)
     event.setdefault("insert_id", stable_insert_id(event))
     return [
@@ -317,7 +430,9 @@ def _to_hex_id(value: Any, byte_length: int, field_name: str) -> str:
 
 def _http_v2_time(value: Any, field_name: str = "time") -> int:
     if value is None:
-        raise ConversionError("{} is required".format(field_name))
+        raise ConversionError(
+            "{} is required".format(field_name), reason="invalid_timestamp"
+        )
     if isinstance(value, dt.datetime):
         if value.tzinfo is None:
             value = value.replace(tzinfo=dt.timezone.utc)
@@ -330,7 +445,10 @@ def _http_v2_time(value: Any, field_name: str = "time") -> int:
     try:
         parsed = dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
-        raise ConversionError("{} is not a timestamp: {!r}".format(field_name, value))
+        raise ConversionError(
+            "{} is not a timestamp: {!r}".format(field_name, value),
+            reason="invalid_timestamp",
+        )
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=dt.timezone.utc)
     return int(parsed.timestamp() * 1000)
@@ -338,7 +456,9 @@ def _http_v2_time(value: Any, field_name: str = "time") -> int:
 
 def _unix_nanos(value: Any, field_name: str) -> str:
     if value is None:
-        raise ConversionError("{} is required".format(field_name))
+        raise ConversionError(
+            "{} is required".format(field_name), reason="invalid_timestamp"
+        )
     if isinstance(value, dt.datetime):
         if value.tzinfo is None:
             value = value.replace(tzinfo=dt.timezone.utc)
@@ -368,7 +488,10 @@ def _unix_nanos(value: Any, field_name: str) -> str:
     try:
         parsed = dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
-        raise ConversionError("{} is not a timestamp: {!r}".format(field_name, value))
+        raise ConversionError(
+            "{} is not a timestamp: {!r}".format(field_name, value),
+            reason="invalid_timestamp",
+        )
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=dt.timezone.utc)
     return str(int(parsed.timestamp() * 1_000_000_000))
@@ -421,7 +544,10 @@ def _is_sensitive_attribute(name: str) -> bool:
 
 
 def _otlp_attributes(
-    attributes: Any, content_mode: ContentMode
+    attributes: Any,
+    content_mode: ContentMode,
+    redact_pii: bool = True,
+    custom_patterns: Sequence[str] = (),
 ) -> List[Mapping[str, Any]]:
     attributes = _parse_json_container(attributes, "attributes", {})
     if isinstance(attributes, list):
@@ -435,12 +561,24 @@ def _otlp_attributes(
                 str(attribute["key"])
             ):
                 continue
-            output.append(normalize(attribute))
+            normalized = normalize(attribute)
+            if content_mode == ContentMode.FULL and "value" in normalized:
+                normalized["value"] = _redact_content(
+                    normalized["value"], redact_pii, custom_patterns
+                )
+            output.append(normalized)
         return output
     if not isinstance(attributes, Mapping):
         raise ConversionError("attributes must be an object or OTLP attribute list")
     return [
-        {"key": str(key), "value": _otlp_any_value(value)}
+        {
+            "key": str(key),
+            "value": _otlp_any_value(
+                _redact_content(value, redact_pii, custom_patterns)
+                if content_mode == ContentMode.FULL
+                else value
+            ),
+        }
         for key, value in attributes.items()
         if value is not None
         and not (
@@ -478,7 +616,9 @@ def _status(status: Any) -> Mapping[str, Any]:
 
 
 def _convert_span(
-    raw_span: Mapping[str, Any], fallback_trace_id: Any, content_mode: ContentMode
+    raw_span: Mapping[str, Any],
+    fallback_trace_id: Any,
+    config: ConversionConfig,
 ) -> Mapping[str, Any]:
     span = normalize(raw_span)
     trace_id = span.get("trace_id", span.get("traceId", fallback_trace_id))
@@ -499,7 +639,12 @@ def _convert_span(
         "kind": str(span.get("kind", "SPAN_KIND_INTERNAL")).upper(),
         "startTimeUnixNano": _unix_nanos(start, "span start time"),
         "endTimeUnixNano": _unix_nanos(end, "span end time"),
-        "attributes": _otlp_attributes(span.get("attributes", {}), content_mode),
+        "attributes": _otlp_attributes(
+            span.get("attributes", {}),
+            config.content_mode,
+            config.redact_pii,
+            config.custom_redaction_patterns,
+        ),
         "status": _status(span.get("status", {})),
     }
     if parent_id:
@@ -520,7 +665,10 @@ def _convert_span(
                             "event time",
                         ),
                         "attributes": _otlp_attributes(
-                            event.get("attributes", {}), content_mode
+                            event.get("attributes", {}),
+                            config.content_mode,
+                            config.redact_pii,
+                            config.custom_redaction_patterns,
                         ),
                     }
                 )
@@ -530,7 +678,9 @@ def _convert_span(
     return converted
 
 
-def _resource_attributes(row: Mapping[str, Any], content_mode: ContentMode) -> List[Mapping[str, Any]]:
+def _resource_attributes(
+    row: Mapping[str, Any], config: ConversionConfig
+) -> List[Mapping[str, Any]]:
     metadata = _parse_json_container(
         row.get("trace_metadata", row.get("traceMetadata")), "trace_metadata", {}
     )
@@ -541,12 +691,17 @@ def _resource_attributes(row: Mapping[str, Any], content_mode: ContentMode) -> L
     if isinstance(tags, Mapping):
         attributes.update({"mlflow.tag.{}".format(k): v for k, v in tags.items()})
     attributes.setdefault("service.name", row.get("service_name", "mlflow-unity-catalog"))
-    if content_mode == ContentMode.FULL:
+    if config.content_mode == ContentMode.FULL:
         if row.get("request") is not None:
             attributes["mlflow.trace.request"] = row.get("request")
         if row.get("response") is not None:
             attributes["mlflow.trace.response"] = row.get("response")
-    return _otlp_attributes(attributes, content_mode)
+    return _otlp_attributes(
+        attributes,
+        config.content_mode,
+        config.redact_pii,
+        config.custom_redaction_patterns,
+    )
 
 
 def _convert_mlflow(row: Mapping[str, Any], config: ConversionConfig) -> List[ConvertedRecord]:
@@ -556,7 +711,7 @@ def _convert_mlflow(row: Mapping[str, Any], config: ConversionConfig) -> List[Co
     if not isinstance(spans, list) or not spans:
         raise ConversionError("mlflow-uc record requires a non-empty spans array")
     converted_spans = [
-        _convert_span(span, trace_hex, config.content_mode)
+        _convert_span(span, trace_hex, config)
         for span in spans
         if isinstance(span, Mapping)
     ]
@@ -566,7 +721,7 @@ def _convert_mlflow(row: Mapping[str, Any], config: ConversionConfig) -> List[Co
         "resourceSpans": [
             {
                 "resource": {
-                    "attributes": _resource_attributes(row, config.content_mode)
+                    "attributes": _resource_attributes(row, config)
                 },
                 "scopeSpans": [
                     {
@@ -608,6 +763,53 @@ def convert_record(
     if config.source_format == SourceFormat.MLFLOW_UC:
         return _convert_mlflow(row, config)
     raise ConversionError("unsupported source format: {}".format(config.source_format))
+
+
+def _canonical_session_value(value: Any) -> Optional[str]:
+    if value is None or isinstance(value, (Mapping, list, tuple)):
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def canonical_session_id(
+    record: Mapping[str, Any], config: ConversionConfig
+) -> Optional[str]:
+    """Resolve the canonical conversation/session key without converting content.
+
+    This uses the same mapping and MLflow container parsing as ``convert_record``.
+    Request and trace IDs are intentionally never considered because they can
+    vary across rows belonging to one conversation.
+    """
+    row = normalize(record)
+    if not isinstance(row, Mapping):
+        return None
+    if config.source_format == SourceFormat.MAPPED_COLUMNS:
+        if not config.mapping:
+            return None
+        event = _drop_none(_resolve(config.mapping, row))
+        if not isinstance(event, Mapping):
+            return None
+        properties = event.get("event_properties")
+        if not isinstance(properties, Mapping):
+            return None
+        return _canonical_session_value(properties.get(_SESSION_ID))
+    if config.source_format == SourceFormat.MLFLOW_UC:
+        metadata = _parse_json_container(
+            row.get("trace_metadata", row.get("traceMetadata")),
+            "trace_metadata",
+            {},
+        )
+        tags = _parse_json_container(row.get("tags"), "tags", {})
+        for container in (row, metadata, tags):
+            if not isinstance(container, Mapping):
+                continue
+            for key in ("conversation_id", "session_id"):
+                session_id = _canonical_session_value(container.get(key))
+                if session_id is not None:
+                    return session_id
+        return None
+    return None
 
 
 def combine_payloads(
