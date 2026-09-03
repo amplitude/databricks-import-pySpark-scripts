@@ -72,9 +72,11 @@ _SENSITIVE_KEY_PARTS = (
     "content",
     "input.value",
     "input_state",
+    "inputs",
     "message",
     "output.value",
     "output_state",
+    "outputs",
     "prompt",
     "reasoning",
     "request",
@@ -427,7 +429,13 @@ def _status(status: Any) -> Mapping[str, Any]:
             1: "STATUS_CODE_OK",
             2: "STATUS_CODE_ERROR",
         }.get(code, "STATUS_CODE_UNSET")
-    result: Dict[str, Any] = {"code": str(code).upper()}
+    else:
+        code = {
+            "UNSET": "STATUS_CODE_UNSET",
+            "OK": "STATUS_CODE_OK",
+            "ERROR": "STATUS_CODE_ERROR",
+        }.get(str(code).upper(), str(code).upper())
+    result: Dict[str, Any] = {"code": code}
     message = status.get("message", status.get("description"))
     if message:
         result["message"] = str(message)
