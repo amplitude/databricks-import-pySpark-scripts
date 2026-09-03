@@ -115,6 +115,12 @@ class MappedColumnsTests(unittest.TestCase):
         self.assertEqual(stable_insert_id(event), stable_insert_id(dict(event)))
         self.assertNotEqual(stable_insert_id(event), stable_insert_id(other))
 
+    def test_datetime_timestamp_maps_to_http_v2_millis(self):
+        when = dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=dt.timezone.utc)
+        row = dict(self.row, timestamp=when)
+        record = convert_record(row, mapped_config())[0]
+        self.assertEqual(1_767_268_800_000, record.payload["time"])
+
 
 class MlflowUcTests(unittest.TestCase):
     def setUp(self):

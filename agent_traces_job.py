@@ -456,7 +456,10 @@ def run(
         dbutils = globals().get("dbutils")
     if dbutils is None and (
         not args.dry_run
-        or args.mapping_json_path
+        or (
+            args.mapping_json_path
+            and args.mapping_json_path.startswith(("dbfs:", "s3:", "s3a:", "abfss:"))
+        )
         or (
             args.result_path
             and args.result_path.startswith(("dbfs:", "s3:", "s3a:", "abfss:"))
