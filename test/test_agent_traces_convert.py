@@ -64,6 +64,13 @@ class JsonPathTests(unittest.TestCase):
         self.assertEqual([1, 2], json_path_get(document, "$.items[*].v"))
         self.assertEqual("ok", json_path_get(document, "$['odd-key'].x"))
 
+    def test_wildcard_keeps_partial_index_matches(self):
+        document = {"items": [{"vals": [1]}, {"vals": []}, {"vals": [2, 3]}]}
+        self.assertEqual([1, 2], json_path_get(document, "$.items[*].vals[0]"))
+        self.assertIsNone(
+            json_path_get({"items": [{"vals": []}]}, "$.items[*].vals[0]", None)
+        )
+
     def test_unsupported_syntax_fails_closed(self):
         with self.assertRaises(ConversionError):
             json_path_get({"items": []}, "$..items")
@@ -372,6 +379,7 @@ class JobOptionsTests(unittest.TestCase):
         self.assertTrue(args.redact_pii)
         self.assertEqual(1.0, args.sample_rate)
         self.assertIsNone(args.max_sessions)
+        self.assertIsNone(args.protocol)
 
     def test_validates_sampling_and_custom_patterns(self):
         with self.assertRaisesRegex(ValueError, "sample-rate"):
@@ -652,6 +660,44 @@ class JobOptionsTests(unittest.TestCase):
         self.assertEqual(1, stats[0]["requests_would_send"])
         self.assertGreater(stats[0]["bytes_would_send"], 0)
         self.assertEqual(0, stats[0]["requests_sent"])
+
+    def test_protocol_override_is_applied_to_delivery(self):
+        case = MappedColumnsTests()
+        case.setUp()
+        conversion = {
+            "source_format": "mapped-columns",
+            "mapping": MAPPING,
+            "named_format": None,
+            "content_mode": "full",
+            "strict_essentials": True,
+            "redact_pii": True,
+            "custom_redaction_patterns": (),
+        }
+        delivery = {
+            "api_key": None,
+            "server_zone": "US",
+            "chunk_size": 100,
+            "max_request_bytes": 1_000_000,
+            "max_retries": 0,
+            "initial_backoff_seconds": 0,
+            "request_timeout_seconds": 1,
+            "dry_run": True,
+            "protocol": "otlp-json",
+        }
+        seen = []
+        original = agent_traces_job._request_parts
+
+        def capture(protocol, records, config):
+            seen.append(protocol)
+            return original(protocol, records, config)
+
+        with unittest.mock.patch.object(
+            agent_traces_job, "_request_parts", side_effect=capture
+        ):
+            stats = list(process_partition(0, [case.row], conversion, delivery))
+        self.assertGreaterEqual(len(seen), 1)
+        self.assertEqual({Protocol.OTLP_JSON}, set(seen))
+        self.assertEqual(1, stats[0]["records_converted"])
 
     def test_skips_are_bucketed_by_conversion_reason(self):
         case = MappedColumnsTests()

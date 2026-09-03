@@ -285,7 +285,8 @@ def json_path_get(document: Any, path: str, default: Any = _MISSING) -> Any:
                     continue
                 if isinstance(token, int):
                     if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
-                        next_values.append(value[token])
+                        if 0 <= token < len(value):
+                            next_values.append(value[token])
                 elif isinstance(value, Mapping) and token in value:
                     next_values.append(value[token])
             current = next_values

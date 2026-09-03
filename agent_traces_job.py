@@ -660,7 +660,16 @@ def process_partition(
 ) -> Iterator[Mapping[str, int]]:
     """Convert and deliver one Spark partition, yielding one small stats row."""
     conversion = _conversion_config(conversion_values)
-    delivery = DeliveryConfig(**delivery_values)
+    protocol_override = delivery_values.get("protocol")
+    if protocol_override is not None:
+        protocol_override = Protocol(protocol_override)
+    delivery = DeliveryConfig(
+        **{
+            key: value
+            for key, value in delivery_values.items()
+            if key != "protocol"
+        }
+    )
     stats = {
         "partition_id": partition_id,
         "rows_read": 0,
@@ -701,6 +710,8 @@ def process_partition(
             continue
         stats["records_converted"] += len(converted)
         for record in converted:
+            if protocol_override is not None:
+                record = dataclasses.replace(record, protocol=protocol_override)
             if pending and (
                 pending[0].protocol != record.protocol
                 or len(pending) >= delivery.chunk_size
@@ -842,6 +853,8 @@ def run(
             dry_run=args.dry_run,
         )
     )
+    if args.protocol is not None:
+        delivery_values["protocol"] = args.protocol
     started = dt.datetime.now(dt.timezone.utc)
     partition_stats = data_frame.rdd.mapPartitionsWithIndex(
         lambda partition_id, rows: process_partition(
