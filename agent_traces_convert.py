@@ -75,6 +75,8 @@ _SENSITIVE_KEY_PARTS = (
     "input_state",
     "inputs",
     "message",
+    "messages",
+    "input",
     "output.value",
     "output_state",
     "outputs",
@@ -189,7 +191,8 @@ def json_path_get(document: Any, path: str, default: Any = _MISSING) -> Any:
                     continue
                 if isinstance(token, int):
                     if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
-                        next_values.append(value[token])
+                        if 0 <= token < len(value):
+                            next_values.append(value[token])
                 elif isinstance(value, Mapping) and token in value:
                     next_values.append(value[token])
             current = next_values
@@ -415,7 +418,11 @@ def _is_sensitive_attribute(name: str) -> bool:
                 if segments[index : index + len(part_segments)] == part_segments:
                     return True
             continue
-        if any(part == segment for segment in segments):
+        if any(
+            part == segment or segment.endswith(part) for segment in segments
+        ):
+            return True
+        if any(re.match(r"^(input|output)_", segment) for segment in segments):
             return True
     return False
 
