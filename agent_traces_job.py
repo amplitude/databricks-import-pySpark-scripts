@@ -344,7 +344,16 @@ def process_partition(
         content_mode=ContentMode(conversion_values["content_mode"]),
         strict_essentials=bool(conversion_values["strict_essentials"]),
     )
-    delivery = DeliveryConfig(**delivery_values)
+    delivery = DeliveryConfig(
+        **{
+            key: value
+            for key, value in delivery_values.items()
+            if key != "protocol"
+        }
+    )
+    protocol_override = delivery_values.get("protocol")
+    if protocol_override is not None:
+        protocol_override = Protocol(protocol_override)
     stats = {
         "partition_id": partition_id,
         "rows_read": 0,
@@ -375,6 +384,8 @@ def process_partition(
             continue
         stats["records_converted"] += len(converted)
         for record in converted:
+            if protocol_override is not None:
+                record = dataclasses.replace(record, protocol=protocol_override)
             if pending and (
                 pending[0].protocol != record.protocol
                 or len(pending) >= delivery.chunk_size
@@ -502,6 +513,8 @@ def run(
             dry_run=args.dry_run,
         )
     )
+    if args.protocol is not None:
+        delivery_values["protocol"] = args.protocol
     started = dt.datetime.now(dt.timezone.utc)
     partition_stats = data_frame.rdd.mapPartitionsWithIndex(
         lambda partition_id, rows: process_partition(

@@ -480,22 +480,24 @@ def _convert_span(
     raw_span: Mapping[str, Any], fallback_trace_id: Any, content_mode: ContentMode
 ) -> Mapping[str, Any]:
     span = normalize(raw_span)
-    trace_id = span.get("trace_id", span.get("traceId", fallback_trace_id))
-    span_id = span.get("span_id", span.get("spanId"))
-    parent_id = span.get("parent_span_id", span.get("parentSpanId"))
-    start = span.get(
-        "start_time_unix_nano",
-        span.get("startTimeUnixNano", span.get("start_time")),
+    trace_id = span.get("trace_id") or span.get("traceId") or fallback_trace_id
+    span_id = span.get("span_id") or span.get("spanId")
+    parent_id = span.get("parent_span_id") or span.get("parentSpanId")
+    start = (
+        span.get("start_time_unix_nano")
+        or span.get("startTimeUnixNano")
+        or span.get("start_time")
     )
-    end = span.get(
-        "end_time_unix_nano",
-        span.get("endTimeUnixNano", span.get("end_time")),
+    end = (
+        span.get("end_time_unix_nano")
+        or span.get("endTimeUnixNano")
+        or span.get("end_time")
     )
     converted: Dict[str, Any] = {
         "traceId": _to_hex_id(trace_id, 16, "trace_id"),
         "spanId": _to_hex_id(span_id, 8, "span_id"),
         "name": str(span.get("name") or span.get("span_name") or "mlflow.span"),
-        "kind": str(span.get("kind", "SPAN_KIND_INTERNAL")).upper(),
+        "kind": str(span.get("kind") or "SPAN_KIND_INTERNAL").upper(),
         "startTimeUnixNano": _unix_nanos(start, "span start time"),
         "endTimeUnixNano": _unix_nanos(end, "span end time"),
         "attributes": _otlp_attributes(span.get("attributes", {}), content_mode),
@@ -512,10 +514,9 @@ def _convert_span(
                     {
                         "name": str(event.get("name", "")),
                         "timeUnixNano": _unix_nanos(
-                            event.get(
-                                "time_unix_nano",
-                                event.get("timeUnixNano", event.get("time")),
-                            ),
+                            event.get("time_unix_nano")
+                            or event.get("timeUnixNano")
+                            or event.get("time"),
                             "event time",
                         ),
                         "attributes": _otlp_attributes(
