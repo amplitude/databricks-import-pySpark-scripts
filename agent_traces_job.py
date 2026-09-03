@@ -387,9 +387,12 @@ def process_partition(
             # the intake service's less actionable 413.
             _, single_body, _ = _request_parts(record.protocol, [record], delivery)
             single_size = len(
-                json.dumps(single_body, separators=(",", ":"), default=str).encode(
-                    "utf-8"
-                )
+                json.dumps(
+                    single_body,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                    default=str,
+                ).encode("utf-8")
             )
             if single_size > delivery.max_request_bytes:
                 raise ValueError(

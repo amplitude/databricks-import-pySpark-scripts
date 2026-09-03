@@ -72,6 +72,7 @@ _SENSITIVE_KEY_PARTS = (
     "content",
     "input.value",
     "input_state",
+    "inputs",
     "message",
     "output.value",
     "output_state",
@@ -328,7 +329,17 @@ def _unix_nanos(value: Any, field_name: str) -> str:
         elif magnitude < 100_000_000_000_000_000:
             numeric *= 1_000
         return str(numeric)
-    text = str(value)
+    text = str(value).strip()
+    if re.match(r"^-?\d+$", text):
+        numeric = int(text)
+        magnitude = abs(numeric)
+        if magnitude < 100_000_000_000:
+            numeric *= 1_000_000_000
+        elif magnitude < 100_000_000_000_000:
+            numeric *= 1_000_000
+        elif magnitude < 100_000_000_000_000_000:
+            numeric *= 1_000
+        return str(numeric)
     try:
         parsed = dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
@@ -427,7 +438,14 @@ def _status(status: Any) -> Mapping[str, Any]:
             1: "STATUS_CODE_OK",
             2: "STATUS_CODE_ERROR",
         }.get(code, "STATUS_CODE_UNSET")
-    result: Dict[str, Any] = {"code": str(code).upper()}
+    code = str(code).upper()
+    if not code.startswith("STATUS_CODE_"):
+        code = {
+            "OK": "STATUS_CODE_OK",
+            "ERROR": "STATUS_CODE_ERROR",
+            "UNSET": "STATUS_CODE_UNSET",
+        }.get(code, "STATUS_CODE_UNSET")
+    result: Dict[str, Any] = {"code": code}
     message = status.get("message", status.get("description"))
     if message:
         result["message"] = str(message)
@@ -463,7 +481,27 @@ def _convert_span(
         converted["parentSpanId"] = _to_hex_id(parent_id, 8, "parent_span_id")
     events = span.get("events")
     if events:
-        converted["events"] = normalize(_parse_json_container(events, "events", []))
+        parsed_events = _parse_json_container(events, "events", [])
+        if isinstance(parsed_events, list):
+            converted["events"] = [
+                normalize(
+                    {
+                        "name": str(event.get("name", "")),
+                        "timeUnixNano": _unix_nanos(
+                            event.get(
+                                "time_unix_nano",
+                                event.get("timeUnixNano", event.get("time")),
+                            ),
+                            "event time",
+                        ),
+                        "attributes": _otlp_attributes(
+                            event.get("attributes", {}), content_mode
+                        ),
+                    }
+                )
+                for event in parsed_events
+                if isinstance(event, Mapping)
+            ]
     return converted
 
 
