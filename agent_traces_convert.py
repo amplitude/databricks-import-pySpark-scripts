@@ -227,7 +227,8 @@ def stable_insert_id(event: Mapping[str, Any]) -> str:
     material = dict(event)
     material.pop("insert_id", None)
     digest = hashlib.sha256(canonical_json(material).encode("utf-8")).hexdigest()
-    return "dbx-agent-" + digest
+    # Amplitude HTTP V2 caps insert_id at 64 characters.
+    return "dbx-agent-" + digest[:54]
 
 
 _PATH_TOKEN = re.compile(

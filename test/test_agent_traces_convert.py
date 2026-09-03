@@ -661,7 +661,7 @@ class JobOptionsTests(unittest.TestCase):
         self.assertGreater(stats[0]["bytes_would_send"], 0)
         self.assertEqual(0, stats[0]["requests_sent"])
 
-    def test_protocol_override_is_applied_to_delivery(self):
+    def test_protocol_override_rejects_mismatched_payload_protocol(self):
         case = MappedColumnsTests()
         case.setUp()
         conversion = {
@@ -684,20 +684,8 @@ class JobOptionsTests(unittest.TestCase):
             "dry_run": True,
             "protocol": "otlp-json",
         }
-        seen = []
-        original = agent_traces_job._request_parts
-
-        def capture(protocol, records, config):
-            seen.append(protocol)
-            return original(protocol, records, config)
-
-        with unittest.mock.patch.object(
-            agent_traces_job, "_request_parts", side_effect=capture
-        ):
-            stats = list(process_partition(0, [case.row], conversion, delivery))
-        self.assertGreaterEqual(len(seen), 1)
-        self.assertEqual({Protocol.OTLP_JSON}, set(seen))
-        self.assertEqual(1, stats[0]["records_converted"])
+        with self.assertRaisesRegex(ValueError, "protocol override"):
+            list(process_partition(0, [case.row], conversion, delivery))
 
     def test_skips_are_bucketed_by_conversion_reason(self):
         case = MappedColumnsTests()
