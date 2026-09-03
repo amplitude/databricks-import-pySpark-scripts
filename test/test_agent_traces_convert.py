@@ -143,6 +143,7 @@ class MlflowUcTests(unittest.TestCase):
                     "attributes": {
                         "gen_ai.request.model": "gpt-test",
                         "gen_ai.prompt": "private",
+                        "gen_ai.usage.prompt_tokens": 42,
                         "tokens": 12,
                     },
                     "status": {"code": "STATUS_CODE_OK"},
@@ -161,6 +162,7 @@ class MlflowUcTests(unittest.TestCase):
             for item in resource["scopeSpans"][0]["spans"][0]["attributes"]
         }
         self.assertIn("gen_ai.request.model", attributes)
+        self.assertIn("gen_ai.usage.prompt_tokens", attributes)
         self.assertIn("tokens", attributes)
         self.assertNotIn("gen_ai.prompt", attributes)
         resource_keys = {
