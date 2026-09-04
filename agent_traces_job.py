@@ -588,6 +588,7 @@ def _request_parts(
     if protocol == Protocol.HTTP_V2:
         # HTTP V2 authenticates in the body.  The body is never logged.
         body["api_key"] = delivery.api_key
+        body["options"] = {"min_id_length": 1}
         return HTTP_V2_ENDPOINTS[delivery.server_zone], body, {}
     return (
         OTLP_ENDPOINTS[delivery.server_zone],

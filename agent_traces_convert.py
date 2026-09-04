@@ -259,7 +259,15 @@ def _is_identity_key(name: str) -> bool:
     lowered = name.lower()
     if lowered in _IDENTITY_KEYS or lowered.endswith("enduser.id"):
         return True
-    return lowered.rsplit(".", 1)[-1] in _IDENTITY_KEY_SUFFIXES
+    if lowered.rsplit(".", 1)[-1] in _IDENTITY_KEY_SUFFIXES:
+        return True
+    for session_key in _MLFLOW_SESSION_KEYS:
+        session_key_lower = session_key.lower()
+        if lowered == session_key_lower or lowered.endswith(
+            ".{}".format(session_key_lower)
+        ):
+            return True
+    return False
 
 
 def _redact_content(
@@ -504,15 +512,20 @@ def _http_v2_time(value: Any, field_name: str = "time") -> int:
     text = str(value).strip()
     if re.match(r"^-?\d+$", text):
         return int(text)
-    try:
-        parsed = dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError:
-        raise ConversionError(
-            "{} is not a timestamp: {!r}".format(field_name, value),
-            reason="invalid_timestamp",
+    if re.match(r"^\d{4}-\d{2}-\d{2}$", text):
+        parsed = dt.datetime.combine(
+            dt.date.fromisoformat(text), dt.time.min, tzinfo=dt.timezone.utc
         )
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    else:
+        try:
+            parsed = dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            raise ConversionError(
+                "{} is not a timestamp: {!r}".format(field_name, value),
+                reason="invalid_timestamp",
+            )
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=dt.timezone.utc)
     return int(parsed.timestamp() * 1000)
 
 
@@ -547,15 +560,20 @@ def _unix_nanos(value: Any, field_name: str) -> str:
         elif magnitude < 100_000_000_000_000_000:
             numeric *= 1_000
         return str(numeric)
-    try:
-        parsed = dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError:
-        raise ConversionError(
-            "{} is not a timestamp: {!r}".format(field_name, value),
-            reason="invalid_timestamp",
+    if re.match(r"^\d{4}-\d{2}-\d{2}$", text):
+        parsed = dt.datetime.combine(
+            dt.date.fromisoformat(text), dt.time.min, tzinfo=dt.timezone.utc
         )
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    else:
+        try:
+            parsed = dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            raise ConversionError(
+                "{} is not a timestamp: {!r}".format(field_name, value),
+                reason="invalid_timestamp",
+            )
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=dt.timezone.utc)
     return str(int(parsed.timestamp() * 1_000_000_000))
 
 
