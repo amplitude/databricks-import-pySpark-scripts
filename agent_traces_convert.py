@@ -614,7 +614,7 @@ def _mapped_otlp_span(event: Mapping[str, Any], config: ConversionConfig) -> Map
     for source, target in aliases.items():
         if properties.get(source) is not None:
             attrs[target] = properties[source]
-    _apply_session_attributes(attrs, properties.get(_SESSION_ID))
+    _apply_session_attributes(attrs, _canonical_session_value(properties.get(_SESSION_ID)))
     identity = event.get("user_id") or event.get("device_id")
     if identity is not None:
         attrs["enduser.id"] = identity
@@ -640,16 +640,20 @@ def _mapped_otlp_span(event: Mapping[str, Any], config: ConversionConfig) -> Map
     }
     if properties.get("[Agent] Error Message"):
         status["message"] = properties["[Agent] Error Message"]
+    latency_ms = properties.get("[Agent] Latency Ms", 0)
+    try:
+        latency_micros = max(1, int(float(latency_ms) * 1_000_000))
+    except (TypeError, ValueError):
+        raise ConversionError(
+            "[Agent] Latency Ms must be numeric: {!r}".format(latency_ms)
+        )
     span: Dict[str, Any] = {
         "traceId": trace_id,
         "spanId": span_id,
         "name": name,
         "kind": "SPAN_KIND_INTERNAL",
         "startTimeUnixNano": str(time_millis * 1_000_000),
-        "endTimeUnixNano": str(
-            time_millis * 1_000_000
-            + max(1, int(float(properties.get("[Agent] Latency Ms", 0)) * 1_000_000))
-        ),
+        "endTimeUnixNano": str(time_millis * 1_000_000 + latency_micros),
         "attributes": _otlp_attributes(
             attrs,
             config.content_mode,
@@ -685,9 +689,13 @@ def _convert_mapped(row: Mapping[str, Any], config: ConversionConfig) -> List[Co
         raise ConversionError("mapping must resolve to an HTTP V2 event object")
     properties = event.setdefault("event_properties", {})
     if isinstance(properties, dict) and config.session_id_column:
-        properties[_SESSION_ID] = row.get(config.session_id_column)
+        session_override = _canonical_session_value(row.get(config.session_id_column))
+        if session_override is not None:
+            properties[_SESSION_ID] = session_override
     if config.user_id_column:
-        event["user_id"] = row.get(config.user_id_column)
+        user_override = _canonical_session_value(row.get(config.user_id_column))
+        if user_override is not None:
+            event["user_id"] = user_override
     # Session End is SDK lifecycle output, not a source trace/span.  Imports must
     # neither synthesize nor replay it.
     if event.get("event_type") == _SESSION_END:
@@ -1259,7 +1267,9 @@ def canonical_session_id(
         return None
     if config.source_format == SourceFormat.MAPPED_COLUMNS:
         if config.session_id_column:
-            return _canonical_session_value(row.get(config.session_id_column))
+            session_id = _canonical_session_value(row.get(config.session_id_column))
+            if session_id is not None:
+                return session_id
         if not config.mapping:
             return None
         event = _drop_none(_resolve(config.mapping, row))
