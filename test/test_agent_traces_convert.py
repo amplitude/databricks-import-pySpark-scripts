@@ -128,7 +128,7 @@ class MappedColumnsTests(unittest.TestCase):
             "event_properties"
         ]["[Agent] Tool Input"]
         self.assertEqual("[email]", tool_input["email"])
-        self.assertEqual("([phone]", tool_input["us_phone"])
+        self.assertEqual("[phone]", tool_input["us_phone"])
         self.assertEqual("[phone]", tool_input["intl_phone"])
         self.assertEqual("[credit_card]", tool_input["card"])
         self.assertEqual("[ssn]", tool_input["ssn"])
