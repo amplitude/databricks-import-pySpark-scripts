@@ -14,9 +14,12 @@ from agent_traces_convert import (
     ConversionError,
     Protocol,
     SourceFormat,
+    _http_v2_time,
     _is_sensitive_attribute,
     _span_kind,
+    _status,
     _to_hex_id,
+    _unix_nanos,
     canonical_session_id,
     combine_payloads,
     convert_record,
@@ -145,6 +148,35 @@ class SensitiveAttributeTests(unittest.TestCase):
         self.assertFalse(_is_sensitive_attribute("service.name"))
         self.assertFalse(_is_sensitive_attribute("gen_ai.usage.total_tokens"))
         self.assertFalse(_is_sensitive_attribute("gen_ai.usage.prompt_tokens"))
+
+
+class StatusMessageTests(unittest.TestCase):
+    def test_status_message_is_redacted(self):
+        config = ConversionConfig(source_format=SourceFormat.MLFLOW_UC)
+        status = _status({"code": "ERROR", "message": "failed for a@example.com"}, config)
+        self.assertEqual("failed for [email]", status["message"])
+
+    def test_status_message_untouched_when_redaction_disabled(self):
+        config = ConversionConfig(source_format=SourceFormat.MLFLOW_UC, redact_pii=False)
+        status = _status({"code": "ERROR", "message": "failed for a@example.com"}, config)
+        self.assertEqual("failed for a@example.com", status["message"])
+
+
+class SpecialFloatTests(unittest.TestCase):
+    def test_non_finite_floats_are_dropped_by_normalize(self):
+        self.assertIsNone(normalize(float("nan")))
+        self.assertIsNone(normalize(float("inf")))
+        self.assertIsNone(normalize(float("-inf")))
+        self.assertEqual(1.5, normalize(1.5))
+
+    def test_non_finite_timestamps_raise_conversion_error(self):
+        for value in (float("nan"), float("inf")):
+            with self.assertRaises(ConversionError) as ctx:
+                _http_v2_time(value)
+            self.assertEqual("invalid_timestamp", ctx.exception.reason)
+            with self.assertRaises(ConversionError) as ctx:
+                _unix_nanos(value, "span start time")
+            self.assertEqual("invalid_timestamp", ctx.exception.reason)
 
 
 class SpanKindTests(unittest.TestCase):
