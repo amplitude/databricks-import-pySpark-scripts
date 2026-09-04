@@ -12,6 +12,7 @@ import datetime as dt
 import enum
 import hashlib
 import json
+import math
 import re
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
@@ -515,6 +516,11 @@ def _http_v2_time(value: Any, field_name: str = "time") -> int:
             value = value.replace(tzinfo=dt.timezone.utc)
         return int(value.timestamp() * 1000)
     if isinstance(value, (int, float)):
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ConversionError(
+                "{} is not a timestamp: {!r}".format(field_name, value),
+                reason="invalid_timestamp",
+            )
         return int(value)
     text = str(value).strip()
     if re.match(r"^-?\d+$", text):
@@ -541,6 +547,11 @@ def _unix_nanos(value: Any, field_name: str) -> str:
             value = value.replace(tzinfo=dt.timezone.utc)
         return str(int(value.timestamp() * 1_000_000_000))
     if isinstance(value, (int, float)):
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ConversionError(
+                "{} is not a timestamp: {!r}".format(field_name, value),
+                reason="invalid_timestamp",
+            )
         numeric = int(value)
         # MLflow schemas have used seconds, milliseconds, microseconds and nanos.
         magnitude = abs(numeric)
@@ -581,6 +592,8 @@ def _otlp_any_value(value: Any) -> Mapping[str, Any]:
     if isinstance(value, int):
         return {"intValue": str(value)}
     if isinstance(value, float):
+        if not math.isfinite(value):
+            return {"stringValue": str(value)}
         return {"doubleValue": value}
     if isinstance(value, str):
         return {"stringValue": value}
@@ -700,7 +713,11 @@ def _span_kind(kind: Any) -> str:
     return prefixed if prefixed in _SPAN_KIND_NAMES else "SPAN_KIND_INTERNAL"
 
 
-def _status(status: Any) -> Mapping[str, Any]:
+def _status(
+    status: Any,
+    redact_pii: bool = True,
+    custom_patterns: Sequence[str] = (),
+) -> Mapping[str, Any]:
     status = _parse_json_container(status, "status", {})
     if isinstance(status, str):
         status = {"code": status}
@@ -723,7 +740,7 @@ def _status(status: Any) -> Mapping[str, Any]:
     result: Dict[str, Any] = {"code": code}
     message = status.get("message", status.get("description"))
     if message:
-        result["message"] = str(message)
+        result["message"] = _redact_text(str(message), redact_pii, custom_patterns)
     return result
 
 
@@ -757,7 +774,11 @@ def _convert_span(
             config.redact_pii,
             config.custom_redaction_patterns,
         ),
-        "status": _status(span.get("status", {})),
+        "status": _status(
+            span.get("status", {}),
+            config.redact_pii,
+            config.custom_redaction_patterns,
+        ),
     }
     if parent_id:
         converted["parentSpanId"] = _to_hex_id(parent_id, 8, "parent_span_id")
