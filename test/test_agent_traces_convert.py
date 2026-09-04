@@ -280,6 +280,14 @@ class MappedColumnsTests(unittest.TestCase):
         self.assertEqual("[secret]", tool_input["openai_key"])
         self.assertEqual("[base64 image redacted]", tool_input["image"])
 
+    def test_full_mode_redacts_api_key_fields(self):
+        row = dict(self.row, tool_input={"api_key": "sk-live", "apiKey": "sk-camel"})
+        tool_input = span_attributes(convert_record(row, mapped_config())[0])[
+            "gen_ai.tool.call.arguments"
+        ]
+        self.assertEqual("[secret]", tool_input["api_key"])
+        self.assertEqual("[secret]", tool_input["apiKey"])
+
     def test_full_mode_preserves_email_shaped_identity_keys(self):
         mapping = dict(MAPPING)
         mapping["event_properties"] = dict(

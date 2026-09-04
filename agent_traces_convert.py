@@ -377,7 +377,7 @@ def _redact_content(
             parts = set(re.split(r"[^a-z0-9]+", lowered))
             if _is_identity_key(key_text):
                 output[key] = item
-            elif parts & _SECRET_KEY_PARTS:
+            elif lowered in _SECRET_KEY_PARTS or parts & _SECRET_KEY_PARTS:
                 output[key] = "[secret]"
             else:
                 output[key] = _redact_content(item, redact_pii, custom_patterns)
