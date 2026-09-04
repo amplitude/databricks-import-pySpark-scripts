@@ -79,10 +79,11 @@ _MISSING = object()
 
 
 def _first_present(mapping: Mapping[str, Any], *keys: str, default: Any = None) -> Any:
-    """Return the first non-None alias.
+    """Return the first non-None, non-empty alias.
 
     Spark ``asDict()`` and JSON spans often include null keys.  ``dict.get``
     treats those as hits, which would skip later aliases and fallbacks.
+    Warehouse StringType columns also store ``""`` for unused values.
     """
     if not isinstance(mapping, Mapping):
         return default
@@ -90,7 +91,7 @@ def _first_present(mapping: Mapping[str, Any], *keys: str, default: Any = None) 
         if key not in mapping:
             continue
         value = mapping[key]
-        if value is not None:
+        if value is not None and value != "":
             return value
     return default
 
@@ -615,7 +616,9 @@ def _mapped_otlp_span(event: Mapping[str, Any], config: ConversionConfig) -> Map
     for source, target in aliases.items():
         if properties.get(source) is not None:
             attrs[target] = properties[source]
-    _apply_session_attributes(attrs, properties.get(_SESSION_ID))
+    _apply_session_attributes(
+        attrs, _canonical_session_value(properties.get(_SESSION_ID))
+    )
     identity = event.get("user_id") or event.get("device_id")
     if identity is not None:
         attrs["enduser.id"] = identity
@@ -725,6 +728,8 @@ def _parse_json_container(value: Any, field_name: str, default: Any) -> Any:
         return default
     value = normalize(value)
     if isinstance(value, str):
+        if not value.strip():
+            return default
         try:
             return json.loads(value)
         except ValueError as exc:
