@@ -584,7 +584,8 @@ def _derived_hex(value: Any, length: int, material: Any) -> str:
     text = str(value or "").strip().replace("-", "").lower()
     if len(text) == length and re.match(r"^[0-9a-f]+$", text):
         return text
-    return hashlib.sha256(canonical_json(material).encode("utf-8")).hexdigest()[:length]
+    hash_material = text if text else material
+    return hashlib.sha256(canonical_json(hash_material).encode("utf-8")).hexdigest()[:length]
 
 
 def _agent_message_text(value: Any) -> Any:
