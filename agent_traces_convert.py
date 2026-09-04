@@ -601,6 +601,13 @@ def _agent_message_text(value: Any) -> Any:
     return value
 
 
+def _coerce_bool(value: Any) -> bool:
+    if isinstance(value, str):
+        if value.strip().lower() in ("", "0", "false", "no", "n", "off"):
+            return False
+    return bool(value)
+
+
 def _mapped_otlp_span(event: Mapping[str, Any], config: ConversionConfig) -> Mapping[str, Any]:
     properties = dict(event.get("event_properties") or {})
     event_type = event["event_type"]
@@ -668,7 +675,7 @@ def _mapped_otlp_span(event: Mapping[str, Any], config: ConversionConfig) -> Map
 
     status: Dict[str, Any] = {
         "code": "STATUS_CODE_ERROR"
-        if properties.get("[Agent] Is Error")
+        if _coerce_bool(properties.get("[Agent] Is Error"))
         else "STATUS_CODE_OK"
     }
     if properties.get("[Agent] Error Message"):
