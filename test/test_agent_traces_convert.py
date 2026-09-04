@@ -315,6 +315,34 @@ class MappedColumnsTests(unittest.TestCase):
         self.assertEqual("3", str(tool_input["mlflow.chat.tokenUsage"]))
         self.assertEqual("12", str(tool_input["llm.token_count.prompt"]))
 
+    def test_blank_override_columns_keep_mapped_identity(self):
+        mapping = dict(MAPPING)
+        mapping["event_properties"] = dict(
+            MAPPING["event_properties"],
+            **{"[Agent] Session ID": "$.session_id"},
+        )
+        row = dict(self.row, session_id="mapped-s", custom_session="", custom_user=None)
+        config = mapped_config(
+            mapping=mapping,
+            session_id_column="custom_session",
+            user_id_column="custom_user",
+        )
+        self.assertEqual("mapped-s", canonical_session_id(row, config))
+        record = convert_record(row, config)[0]
+        self.assertEqual("mapped-s", span_attributes(record)["gen_ai.conversation.id"])
+        self.assertEqual("user-1", span_attributes(record)["enduser.id"])
+
+    def test_non_numeric_latency_is_an_invalid_record(self):
+        mapping = dict(MAPPING)
+        mapping["event_properties"] = dict(
+            MAPPING["event_properties"],
+            **{"[Agent] Latency Ms": "$.latency_ms"},
+        )
+        row = dict(self.row, latency_ms="not-a-number")
+        with self.assertRaises(ConversionError) as ctx:
+            convert_record(row, mapped_config(mapping=mapping))
+        self.assertEqual("invalid_record", ctx.exception.reason)
+
     def test_full_mode_preserves_email_shaped_identity_keys(self):
         mapping = dict(MAPPING)
         mapping["event_properties"] = dict(
@@ -607,6 +635,14 @@ class MlflowUcTests(unittest.TestCase):
         self.assertEqual("override-s", attrs["gen_ai.conversation.id"])
         self.assertEqual("override-s", attrs["session.id"])
         self.assertEqual("override-u", attrs["enduser.id"])
+
+    def test_blank_session_column_falls_back_to_mlflow_metadata(self):
+        row = dict(self.row, session_id="session-row", custom_session="")
+        config = ConversionConfig(
+            source_format=SourceFormat.MLFLOW_UC,
+            session_id_column="custom_session",
+        )
+        self.assertEqual("session-row", canonical_session_id(row, config))
 
 
 class _FakeSchema:

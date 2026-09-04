@@ -647,8 +647,7 @@ def _mapped_otlp_span(event: Mapping[str, Any], config: ConversionConfig) -> Map
         "kind": "SPAN_KIND_INTERNAL",
         "startTimeUnixNano": str(time_millis * 1_000_000),
         "endTimeUnixNano": str(
-            time_millis * 1_000_000
-            + max(1, int(float(properties.get("[Agent] Latency Ms", 0)) * 1_000_000))
+            time_millis * 1_000_000 + _mapped_duration_nanos(properties.get("[Agent] Latency Ms", 0))
         ),
         "attributes": _otlp_attributes(
             attrs,
@@ -684,10 +683,13 @@ def _convert_mapped(row: Mapping[str, Any], config: ConversionConfig) -> List[Co
     if not isinstance(event, dict):
         raise ConversionError("mapping must resolve to an HTTP V2 event object")
     properties = event.setdefault("event_properties", {})
-    if isinstance(properties, dict) and config.session_id_column:
-        properties[_SESSION_ID] = row.get(config.session_id_column)
-    if config.user_id_column:
-        event["user_id"] = row.get(config.user_id_column)
+    if isinstance(properties, dict):
+        session_id = _column_override(row, config.session_id_column)
+        if session_id is not None:
+            properties[_SESSION_ID] = session_id
+    user_id = _column_override(row, config.user_id_column)
+    if user_id is not None:
+        event["user_id"] = user_id
     # Session End is SDK lifecycle output, not a source trace/span.  Imports must
     # neither synthesize nor replay it.
     if event.get("event_type") == _SESSION_END:
@@ -1245,6 +1247,21 @@ def _canonical_session_value(value: Any) -> Optional[str]:
     return text or None
 
 
+def _column_override(row: Mapping[str, Any], column: Optional[str]) -> Optional[str]:
+    if not column:
+        return None
+    return _canonical_session_value(row.get(column))
+
+
+def _mapped_duration_nanos(latency_ms: Any) -> int:
+    try:
+        return max(1, int(float(latency_ms) * 1_000_000))
+    except (TypeError, ValueError):
+        raise ConversionError(
+            "[Agent] Latency Ms must be numeric", reason="invalid_record"
+        )
+
+
 def canonical_session_id(
     record: Mapping[str, Any], config: ConversionConfig
 ) -> Optional[str]:
@@ -1258,8 +1275,9 @@ def canonical_session_id(
     if not isinstance(row, Mapping):
         return None
     if config.source_format == SourceFormat.MAPPED_COLUMNS:
-        if config.session_id_column:
-            return _canonical_session_value(row.get(config.session_id_column))
+        override = _column_override(row, config.session_id_column)
+        if override is not None:
+            return override
         if not config.mapping:
             return None
         event = _drop_none(_resolve(config.mapping, row))
@@ -1270,8 +1288,9 @@ def canonical_session_id(
             return None
         return _canonical_session_value(properties.get(_SESSION_ID))
     if config.source_format == SourceFormat.MLFLOW_UC:
-        if config.session_id_column:
-            return _canonical_session_value(row.get(config.session_id_column))
+        override = _column_override(row, config.session_id_column)
+        if override is not None:
+            return override
         metadata = _parse_json_container(
             row.get("trace_metadata", row.get("traceMetadata")),
             "trace_metadata",
