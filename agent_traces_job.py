@@ -710,8 +710,12 @@ def process_partition(
             continue
         stats["records_converted"] += len(converted)
         for record in converted:
-            if protocol_override is not None:
-                record = dataclasses.replace(record, protocol=protocol_override)
+            if protocol_override is not None and protocol_override != record.protocol:
+                raise ValueError(
+                    "protocol override {!r} does not match converted payload protocol {!r}".format(
+                        protocol_override.value, record.protocol.value
+                    )
+                )
             if pending and (
                 pending[0].protocol != record.protocol
                 or len(pending) >= delivery.chunk_size

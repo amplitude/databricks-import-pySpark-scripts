@@ -94,6 +94,7 @@ class MappedColumnsTests(unittest.TestCase):
         self.assertEqual(Protocol.HTTP_V2, first.protocol)
         self.assertEqual(first.stable_key, second.stable_key)
         self.assertTrue(first.payload["insert_id"].startswith("dbx-agent-"))
+        self.assertLessEqual(len(first.payload["insert_id"]), 64)
         self.assertIn(
             "[Agent] Tool Input", first.payload["event_properties"]
         )
@@ -186,6 +187,8 @@ class MappedColumnsTests(unittest.TestCase):
         other = dict(event, user_id="v")
         self.assertEqual(stable_insert_id(event), stable_insert_id(dict(event)))
         self.assertNotEqual(stable_insert_id(event), stable_insert_id(other))
+        self.assertLessEqual(len(stable_insert_id(event)), 64)
+        self.assertTrue(stable_insert_id(event).startswith("dbx-agent-"))
 
     def test_datetime_timestamp_maps_to_http_v2_millis(self):
         when = dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=dt.timezone.utc)
@@ -661,7 +664,7 @@ class JobOptionsTests(unittest.TestCase):
         self.assertGreater(stats[0]["bytes_would_send"], 0)
         self.assertEqual(0, stats[0]["requests_sent"])
 
-    def test_protocol_override_is_applied_to_delivery(self):
+    def test_protocol_override_rejects_mismatched_payload_protocol(self):
         case = MappedColumnsTests()
         case.setUp()
         conversion = {
@@ -684,20 +687,13 @@ class JobOptionsTests(unittest.TestCase):
             "dry_run": True,
             "protocol": "otlp-json",
         }
-        seen = []
-        original = agent_traces_job._request_parts
+        with self.assertRaisesRegex(ValueError, "protocol override"):
+            list(process_partition(0, [case.row], conversion, delivery))
 
-        def capture(protocol, records, config):
-            seen.append(protocol)
-            return original(protocol, records, config)
-
-        with unittest.mock.patch.object(
-            agent_traces_job, "_request_parts", side_effect=capture
-        ):
-            stats = list(process_partition(0, [case.row], conversion, delivery))
-        self.assertGreaterEqual(len(seen), 1)
-        self.assertEqual({Protocol.OTLP_JSON}, set(seen))
+        delivery["protocol"] = "http-v2"
+        stats = list(process_partition(0, [case.row], conversion, delivery))
         self.assertEqual(1, stats[0]["records_converted"])
+        self.assertEqual(1, stats[0]["requests_would_send"])
 
     def test_skips_are_bucketed_by_conversion_reason(self):
         case = MappedColumnsTests()
