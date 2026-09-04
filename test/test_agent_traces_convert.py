@@ -213,6 +213,17 @@ class StatusMessageTests(unittest.TestCase):
         status = _status({"code": "ERROR", "message": "failed for a@example.com"}, config)
         self.assertEqual("failed for a@example.com", status["message"])
 
+    def test_metadata_only_omits_status_message(self):
+        config = ConversionConfig(
+            source_format=SourceFormat.MLFLOW_UC,
+            content_mode=ContentMode.METADATA_ONLY,
+        )
+        status = _status(
+            {"code": "ERROR", "message": "user said secret@example.com"}, config
+        )
+        self.assertEqual("STATUS_CODE_ERROR", status["code"])
+        self.assertNotIn("message", status)
+
 
 class SpecialFloatTests(unittest.TestCase):
     def test_non_finite_floats_are_dropped_by_normalize(self):
@@ -291,6 +302,8 @@ class MappedColumnsTests(unittest.TestCase):
                 "[Agent] Cost USD": "$.cost",
                 "[Agent] Finish Reason": "$.finish_reason",
                 "[Agent] Provider Request ID": "$.request_id",
+                "[Agent] Tool Name": "$.tool_name",
+                "[Agent] Invocation ID": "$.invocation_id",
             },
         )
         row = dict(
@@ -299,6 +312,8 @@ class MappedColumnsTests(unittest.TestCase):
             cost=0.02,
             finish_reason="stop",
             request_id="req-1",
+            tool_name="search",
+            invocation_id="call-1",
         )
         attrs = span_attributes(
             convert_record(
@@ -310,6 +325,8 @@ class MappedColumnsTests(unittest.TestCase):
         self.assertEqual("0.02", str(attrs["gen_ai.usage.cost"]))
         self.assertEqual("stop", attrs["gen_ai.response.finish_reason"])
         self.assertEqual("req-1", attrs["gen_ai.response.id"])
+        self.assertEqual("search", attrs["gen_ai.tool.name"])
+        self.assertEqual("call-1", attrs["gen_ai.tool.call.id"])
 
     def test_mapped_row_without_session_is_skipped(self):
         row = dict(self.row)

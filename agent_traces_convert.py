@@ -237,6 +237,8 @@ _METADATA_ATTRIBUTE_ALLOWLIST = frozenset(
         "amplitude.session_id",
         "enduser.id",
         "gen_ai.agent.id",
+        "gen_ai.tool.name",
+        "gen_ai.tool.call.id",
         "deployment.environment",
         "service.name",
         "openinference.span.kind",
@@ -1028,6 +1030,8 @@ def _status(status: Any, config: Optional[ConversionConfig] = None) -> Mapping[s
             "UNSET": "STATUS_CODE_UNSET",
         }.get(code, "STATUS_CODE_UNSET")
     result: Dict[str, Any] = {"code": code}
+    if config is not None and config.content_mode == ContentMode.METADATA_ONLY:
+        return result
     message = _first_present(status, "message", "description")
     if message:
         message = str(message)
