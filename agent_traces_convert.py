@@ -364,6 +364,16 @@ def _is_identity_key(name: str) -> bool:
     return lowered.rsplit(".", 1)[-1] in _IDENTITY_KEY_SUFFIXES
 
 
+def _is_secret_key(name: str) -> bool:
+    lowered = _CAMEL_BOUNDARY.sub("_", str(name)).lower()
+    if lowered in _SECRET_KEY_PARTS:
+        return True
+    if any(lowered.endswith("_{}".format(part)) for part in _SECRET_KEY_PARTS):
+        return True
+    parts = set(re.split(r"[^a-z0-9]+", lowered))
+    return bool(parts & _SECRET_KEY_PARTS)
+
+
 def _redact_content(
     value: Any, redact_pii: bool, custom_patterns: Sequence[str]
 ) -> Any:
@@ -373,11 +383,9 @@ def _redact_content(
         output = {}
         for key, item in value.items():
             key_text = str(key)
-            lowered = _CAMEL_BOUNDARY.sub("_", key_text).lower()
-            parts = set(re.split(r"[^a-z0-9]+", lowered))
             if _is_identity_key(key_text):
                 output[key] = item
-            elif lowered in _SECRET_KEY_PARTS or parts & _SECRET_KEY_PARTS:
+            elif _is_secret_key(key_text):
                 output[key] = "[secret]"
             else:
                 output[key] = _redact_content(item, redact_pii, custom_patterns)
@@ -833,7 +841,9 @@ def _otlp_any_value(value: Any) -> Mapping[str, Any]:
             }
         }
     if isinstance(value, Sequence):
-        return {"arrayValue": {"values": [_otlp_any_value(item) for item in value]}}
+        return {"arrayValue": {"values": [_otlp_any_value(item) for item in value if item is not None]}}
+    if value is None:
+        return {}
     return {"stringValue": str(value)}
 
 
@@ -901,10 +911,16 @@ def _otlp_attributes(
     return [
         {
             "key": str(key),
-            "value": _otlp_any_value(
-                value
-                if content_mode != ContentMode.FULL or _is_identity_key(str(key))
-                else _redact_content(value, redact_pii, custom_patterns)
+            "value": (
+                {"stringValue": "[secret]"}
+                if content_mode == ContentMode.FULL
+                and _is_secret_key(str(key))
+                and not _is_identity_key(str(key))
+                else _otlp_any_value(
+                    value
+                    if content_mode != ContentMode.FULL or _is_identity_key(str(key))
+                    else _redact_content(value, redact_pii, custom_patterns)
+                )
             ),
         }
         for key, value in attributes.items()

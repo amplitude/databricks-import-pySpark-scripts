@@ -196,6 +196,12 @@ class SpecialFloatTests(unittest.TestCase):
         self.assertIsNone(normalize(float("-inf")))
         self.assertEqual(1.5, normalize(1.5))
 
+    def test_non_finite_floats_are_omitted_from_otlp_any_value(self):
+        from agent_traces_convert import _otlp_any_value
+
+        self.assertEqual({}, _otlp_any_value(float("nan")))
+        self.assertEqual({}, _otlp_any_value(float("inf")))
+
     def test_non_finite_timestamps_raise_conversion_error(self):
         for value in (float("nan"), float("inf")):
             with self.assertRaises(ConversionError) as ctx:
@@ -287,6 +293,13 @@ class MappedColumnsTests(unittest.TestCase):
         ]
         self.assertEqual("[secret]", tool_input["api_key"])
         self.assertEqual("[secret]", tool_input["apiKey"])
+
+    def test_full_mode_redacts_compound_secret_keys(self):
+        row = dict(self.row, tool_input={"openai_api_key": "sk-live"})
+        tool_input = span_attributes(convert_record(row, mapped_config())[0])[
+            "gen_ai.tool.call.arguments"
+        ]
+        self.assertEqual("[secret]", tool_input["openai_api_key"])
 
     def test_full_mode_preserves_email_shaped_identity_keys(self):
         mapping = dict(MAPPING)
