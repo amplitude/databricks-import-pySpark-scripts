@@ -798,6 +798,9 @@ def _resource_attributes(
     if isinstance(tags, Mapping):
         attributes.update({"mlflow.tag.{}".format(k): v for k, v in tags.items()})
     attributes.setdefault("service.name", row.get("service_name", "mlflow-unity-catalog"))
+    session_id = canonical_session_id(row, config)
+    if session_id is not None:
+        attributes.setdefault("mlflow.trace.session", session_id)
     if config.content_mode == ContentMode.FULL:
         if row.get("request") is not None:
             attributes["mlflow.trace.request"] = row.get("request")
