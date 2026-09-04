@@ -960,6 +960,15 @@ class JobOptionsTests(unittest.TestCase):
             )
         )
 
+    def test_derive_session_id_falls_back_when_override_column_is_blank(self):
+        values = self._conversion_values("mlflow-uc")
+        values["session_id_column"] = "custom_session"
+        row = {
+            "custom_session": "",
+            "trace_metadata": json.dumps({"session_id": "session-meta"}),
+        }
+        self.assertEqual("session-meta", derive_session_id(row, values))
+
     def test_mapped_nested_jsonpath_session_with_default_cap_no_override(self):
         args, _ = parse_args(
             [

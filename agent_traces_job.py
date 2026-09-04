@@ -430,29 +430,20 @@ def _apply_session_selection(
 
     from pyspark.sql import functions
 
+    source_columns = [functions.col(field.name) for field in data_frame.schema.fields]
+    session_conversion_values = dict(conversion_values)
     if session_column is not None:
-        data_frame = data_frame.withColumn(
-            _SESSION_KEY,
-            functions.trim(functions.col(session_column).cast("string")),
-        )
-    else:
-        source_columns = [
-            functions.col(field.name) for field in data_frame.schema.fields
-        ]
-        session_conversion = _conversion_config(conversion_values)
+        session_conversion_values["session_id_column"] = session_column
 
-        def resolve_session(row: Any) -> Optional[str]:
-            source = row.asDict(recursive=True) if hasattr(row, "asDict") else row
-            try:
-                return canonical_session_id(source, session_conversion)
-            except ConversionError:
-                return None
+    def resolve_session(row: Any) -> Optional[str]:
+        source = row.asDict(recursive=True) if hasattr(row, "asDict") else row
+        return derive_session_id(source, session_conversion_values)
 
-        session_udf = functions.udf(resolve_session, "string")
-        data_frame = data_frame.withColumn(
-            _SESSION_KEY,
-            functions.trim(session_udf(functions.struct(*source_columns))),
-        )
+    session_udf = functions.udf(resolve_session, "string")
+    data_frame = data_frame.withColumn(
+        _SESSION_KEY,
+        functions.trim(session_udf(functions.struct(*source_columns))),
+    )
 
     session_key = functions.col(_SESSION_KEY)
     has_session = session_key.isNotNull() & (functions.length(session_key) > 0)
