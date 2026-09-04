@@ -301,6 +301,20 @@ class MappedColumnsTests(unittest.TestCase):
         ]
         self.assertEqual("[secret]", tool_input["openai_api_key"])
 
+    def test_full_mode_keeps_token_usage_metrics(self):
+        row = dict(
+            self.row,
+            tool_input={
+                "mlflow.chat.tokenUsage": 3,
+                "llm.token_count.prompt": 12,
+            },
+        )
+        tool_input = span_attributes(convert_record(row, mapped_config())[0])[
+            "gen_ai.tool.call.arguments"
+        ]
+        self.assertEqual("3", str(tool_input["mlflow.chat.tokenUsage"]))
+        self.assertEqual("12", str(tool_input["llm.token_count.prompt"]))
+
     def test_full_mode_preserves_email_shaped_identity_keys(self):
         mapping = dict(MAPPING)
         mapping["event_properties"] = dict(

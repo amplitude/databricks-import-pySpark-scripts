@@ -365,13 +365,17 @@ def _is_identity_key(name: str) -> bool:
 
 
 def _is_secret_key(name: str) -> bool:
-    lowered = _CAMEL_BOUNDARY.sub("_", str(name)).lower()
-    if lowered in _SECRET_KEY_PARTS:
-        return True
-    if any(lowered.endswith("_{}".format(part)) for part in _SECRET_KEY_PARTS):
-        return True
-    parts = set(re.split(r"[^a-z0-9]+", lowered))
-    return bool(parts & _SECRET_KEY_PARTS)
+    # Match the whole name, last dotted segment, or a `_secret` suffix
+    # (`openai_api_key`). Interior tokens such as `token` in `tokenUsage` /
+    # `token_count` are usage metrics, not credentials.
+    normalized_key = _CAMEL_BOUNDARY.sub("_", str(name)).lower().replace("-", "_")
+    last_segment = re.split(r"[.\[\]]+", normalized_key)[-1]
+    for candidate in (normalized_key, last_segment):
+        if candidate in _SECRET_KEY_PARTS:
+            return True
+        if any(candidate.endswith("_{}".format(part)) for part in _SECRET_KEY_PARTS):
+            return True
+    return False
 
 
 def _redact_content(
@@ -895,15 +899,19 @@ def _otlp_attributes(
                 str(attribute["key"])
             ):
                 continue
+            key_text = str(attribute["key"])
             normalized = normalize(attribute)
             if (
                 content_mode == ContentMode.FULL
                 and "value" in normalized
-                and not _is_identity_key(str(attribute["key"]))
+                and not _is_identity_key(key_text)
             ):
-                normalized["value"] = _redact_content(
-                    normalized["value"], redact_pii, custom_patterns
-                )
+                if _is_secret_key(key_text):
+                    normalized["value"] = {"stringValue": "[secret]"}
+                else:
+                    normalized["value"] = _redact_content(
+                        normalized["value"], redact_pii, custom_patterns
+                    )
             output.append(normalized)
         return output
     if not isinstance(attributes, Mapping):
