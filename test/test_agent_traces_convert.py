@@ -415,6 +415,38 @@ class MlflowUcTests(unittest.TestCase):
             ],
         }
 
+    def test_null_aliases_fall_through_to_later_fields(self):
+        start = dt.datetime(2026, 1, 1, 0, 0, 2, tzinfo=dt.timezone.utc)
+        end = dt.datetime(2026, 1, 1, 0, 0, 3, tzinfo=dt.timezone.utc)
+        row = dict(self.row)
+        row["trace_id"] = None
+        row["traceId"] = "03" * 16
+        row["spans"] = [
+            {
+                "trace_id": None,
+                "span_id": None,
+                "spanId": "04" * 8,
+                "parent_span_id": None,
+                "parentSpanId": "05" * 8,
+                "start_time_unix_nano": None,
+                "start_time": start,
+                "end_time_unix_nano": None,
+                "end_time": end,
+                "name": "predict",
+                "status": {"code": None, "status_code": "OK"},
+            }
+        ]
+        record = convert_record(
+            row, ConversionConfig(source_format=SourceFormat.MLFLOW_UC)
+        )[0]
+        span = otlp_span(record)
+        self.assertEqual("03" * 16, span["traceId"])
+        self.assertEqual("04" * 8, span["spanId"])
+        self.assertEqual("05" * 8, span["parentSpanId"])
+        self.assertEqual(str(_unix_nanos(start, "span start time")), span["startTimeUnixNano"])
+        self.assertEqual(str(_unix_nanos(end, "span end time")), span["endTimeUnixNano"])
+        self.assertEqual("STATUS_CODE_OK", span["status"]["code"])
+
     def test_builds_otlp_json_and_strips_content(self):
         config = ConversionConfig(
             source_format=SourceFormat.MLFLOW_UC,

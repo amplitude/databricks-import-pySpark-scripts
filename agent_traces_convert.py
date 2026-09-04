@@ -76,6 +76,25 @@ class ConvertedRecord:
 
 
 _MISSING = object()
+
+
+def _first_present(mapping: Mapping[str, Any], *keys: str, default: Any = None) -> Any:
+    """Return the first non-None alias.
+
+    Spark ``asDict()`` and JSON spans often include null keys.  ``dict.get``
+    treats those as hits, which would skip later aliases and fallbacks.
+    """
+    if not isinstance(mapping, Mapping):
+        return default
+    for key in keys:
+        if key not in mapping:
+            continue
+        value = mapping[key]
+        if value is not None:
+            return value
+    return default
+
+
 _AGENT_ID = "[Agent] Agent ID"
 _TRACE_ID = "[Agent] Trace ID"
 _SPAN_ID = "[Agent] Span ID"
@@ -930,7 +949,7 @@ def _status(status: Any, config: Optional[ConversionConfig] = None) -> Mapping[s
         status = {"code": status}
     if not isinstance(status, Mapping):
         return {}
-    code = status.get("code", status.get("status_code", "STATUS_CODE_UNSET"))
+    code = _first_present(status, "code", "status_code", default="STATUS_CODE_UNSET")
     if isinstance(code, int):
         code = {
             0: "STATUS_CODE_UNSET",
@@ -945,7 +964,7 @@ def _status(status: Any, config: Optional[ConversionConfig] = None) -> Mapping[s
             "UNSET": "STATUS_CODE_UNSET",
         }.get(code, "STATUS_CODE_UNSET")
     result: Dict[str, Any] = {"code": code}
-    message = status.get("message", status.get("description"))
+    message = _first_present(status, "message", "description")
     if message:
         message = str(message)
         # Error text routinely embeds user content, so it gets the same
@@ -964,17 +983,13 @@ def _convert_span(
     config: ConversionConfig,
 ) -> Mapping[str, Any]:
     span = normalize(raw_span)
-    trace_id = span.get("trace_id", span.get("traceId", fallback_trace_id))
-    span_id = span.get("span_id", span.get("spanId"))
-    parent_id = span.get("parent_span_id", span.get("parentSpanId", span.get("parent_id")))
-    start = span.get(
-        "start_time_unix_nano",
-        span.get("startTimeUnixNano", span.get("start_time")),
+    trace_id = _first_present(span, "trace_id", "traceId", default=fallback_trace_id)
+    span_id = _first_present(span, "span_id", "spanId")
+    parent_id = _first_present(span, "parent_span_id", "parentSpanId", "parent_id")
+    start = _first_present(
+        span, "start_time_unix_nano", "startTimeUnixNano", "start_time"
     )
-    end = span.get(
-        "end_time_unix_nano",
-        span.get("endTimeUnixNano", span.get("end_time")),
-    )
+    end = _first_present(span, "end_time_unix_nano", "endTimeUnixNano", "end_time")
     raw_attributes = _parse_json_container(span.get("attributes", {}), "attributes", {})
     if not isinstance(raw_attributes, Mapping):
         raise ConversionError("span attributes must be an object")
@@ -998,14 +1013,12 @@ def _convert_span(
     if span_type:
         attributes.setdefault("openinference.span.kind", span_type)
 
-    raw_input = span.get(
-        "inputs",
-        span.get("input", attributes.get("mlflow.spanInputs", attributes.get("input.value"))),
-    )
-    raw_output = span.get(
-        "outputs",
-        span.get("output", attributes.get("mlflow.spanOutputs", attributes.get("output.value"))),
-    )
+    raw_input = _first_present(span, "inputs", "input")
+    if raw_input is None:
+        raw_input = _first_present(attributes, "mlflow.spanInputs", "input.value")
+    raw_output = _first_present(span, "outputs", "output")
+    if raw_output is None:
+        raw_output = _first_present(attributes, "mlflow.spanOutputs", "output.value")
     def message_value(value: Any, default_role: str) -> Any:
         if isinstance(value, Mapping):
             if "messages" in value:
@@ -1034,7 +1047,7 @@ def _convert_span(
     converted: Dict[str, Any] = {
         "traceId": _to_hex_id(trace_id, 16, "trace_id"),
         "spanId": _to_hex_id(span_id, 8, "span_id"),
-        "name": str(span.get("name") or span.get("span_name") or "mlflow.span"),
+        "name": str(_first_present(span, "name", "span_name") or "mlflow.span"),
         "kind": _span_kind(span.get("kind")),
         "startTimeUnixNano": _unix_nanos(start, "span start time"),
         "endTimeUnixNano": _unix_nanos(end, "span end time"),
@@ -1057,9 +1070,8 @@ def _convert_span(
                     {
                         "name": str(event.get("name", "")),
                         "timeUnixNano": _unix_nanos(
-                            event.get(
-                                "time_unix_nano",
-                                event.get("timeUnixNano", event.get("time")),
+                            _first_present(
+                                event, "time_unix_nano", "timeUnixNano", "time"
                             ),
                             "event time",
                         ),
@@ -1099,7 +1111,7 @@ def _resource_attributes(
     row: Mapping[str, Any], config: ConversionConfig
 ) -> List[Mapping[str, Any]]:
     metadata = _parse_json_container(
-        row.get("trace_metadata", row.get("traceMetadata")), "trace_metadata", {}
+        _first_present(row, "trace_metadata", "traceMetadata"), "trace_metadata", {}
     )
     tags = _parse_json_container(row.get("tags"), "tags", {})
     attributes: Dict[str, Any] = {}
@@ -1122,7 +1134,10 @@ def _resource_attributes(
                 break
     if user_id is not None:
         attributes["enduser.id"] = user_id
-    attributes.setdefault("service.name", row.get("service_name", "mlflow-unity-catalog"))
+    attributes.setdefault(
+        "service.name",
+        _first_present(row, "service_name", default="mlflow-unity-catalog"),
+    )
     if config.content_mode == ContentMode.FULL:
         if row.get("request") is not None:
             attributes["mlflow.trace.request"] = row.get("request")
@@ -1137,7 +1152,7 @@ def _resource_attributes(
 
 
 def _convert_mlflow(row: Mapping[str, Any], config: ConversionConfig) -> List[ConvertedRecord]:
-    trace_id = row.get("trace_id", row.get("traceId"))
+    trace_id = _first_present(row, "trace_id", "traceId")
     trace_hex = _to_hex_id(trace_id, 16, "trace_id")
     spans = _parse_json_container(row.get("spans"), "spans", [])
     if not isinstance(spans, list) or not spans:
