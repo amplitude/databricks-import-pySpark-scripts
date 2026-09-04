@@ -567,6 +567,34 @@ class MappedColumnsTests(unittest.TestCase):
         self.assertEqual(first["traceId"], second["traceId"])
         self.assertNotEqual("warehouse-trace", first["traceId"])
 
+    def test_non_hex_mapped_ids_keep_parent_links_and_traces(self):
+        mapping = dict(MAPPING)
+        mapping["event_properties"] = dict(
+            MAPPING["event_properties"],
+            **{"[Agent] Parent Span ID": "$.parent_span_id"},
+        )
+        config = mapped_config(mapping=mapping)
+        parent_id = "550e8400-e29b-41d4-a716-446655440000"
+        parent = otlp_span(
+            convert_record(
+                dict(self.row, type="[Agent] AI Response", span_id=parent_id),
+                config,
+            )[0]
+        )
+        child = otlp_span(
+            convert_record(
+                dict(
+                    self.row,
+                    span_id="child-span-not-hex",
+                    parent_span_id=parent_id,
+                    type="[Agent] Tool Call",
+                ),
+                config,
+            )[0]
+        )
+        self.assertEqual(parent["traceId"], child["traceId"])
+        self.assertEqual(parent["spanId"], child["parentSpanId"])
+
 
 class MlflowUcTests(unittest.TestCase):
     def setUp(self):

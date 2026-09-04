@@ -602,8 +602,14 @@ def _mapped_otlp_span(event: Mapping[str, Any], config: ConversionConfig) -> Map
         "user": event.get("user_id") or event.get("device_id"),
         "event": event,
     }
-    trace_id = _derived_hex(properties.get(_TRACE_ID), 32, trace_material)
-    span_id = _derived_hex(properties.get(_SPAN_ID), 16, event)
+    trace_id = _derived_hex(
+        properties.get(_TRACE_ID),
+        32,
+        properties.get(_TRACE_ID) or trace_material,
+    )
+    span_id = _derived_hex(
+        properties.get(_SPAN_ID), 16, properties.get(_SPAN_ID) or event
+    )
     operation = {
         _USER_MESSAGE: "chat",
         _AI_RESPONSE: "chat",
