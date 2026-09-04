@@ -4,10 +4,13 @@ Python scripts that import data from Databricks.
 ## Agent traces import
 
 `agent_traces_job.py` reads warehouse rows with Spark and sends converted agent
-events directly to Amplitude. It supports exactly two source shapes:
+events directly to Amplitude as OTLP/JSON `ExportTraceServiceRequest` payloads
+at `/v1/traces`. Authentication uses `Authorization: Bearer <key>`; HTTP V2 is
+not a supported delivery mode. It supports exactly two source shapes:
 
-- `mapped-columns`: a JSON mapping converts each row to an Amplitude HTTP V2
-  `[Agent] ...` event.
+- `mapped-columns`: the existing HTTP V2-shaped `[Agent] ...` mapping remains
+  accepted, but each mapped row is translated to one receiver-compatible OTLP
+  span.
 - `mlflow-uc`: MLflow traces from Unity Catalog are converted to OTLP JSON.
 
 The default content mode is `full`. In full mode, built-in PII redaction is on
@@ -23,7 +26,10 @@ Session controls:
   `1.0`. Values of `0` or below and above `1` are rejected.
 - `--max-sessions INTEGER`: optional cap on the number of conversations.
 - `--session-id-column NAME`: optional fast-path/override for a top-level source
-  column containing the conversation ID.
+  column containing the conversation ID. It is used for both selection and the
+  exported `gen_ai.conversation.id`, `session.id`, and `amplitude.session_id`.
+- `--user-id-column NAME`: optional top-level user override exported as
+  `enduser.id`.
 
 Without `--session-id-column`, the job derives the canonical key through the
 same converter contract used for event conversion:
@@ -43,14 +49,19 @@ conversation ID, then join the chosen conversations back to the rows. A
 conversation therefore keeps every row or none, and the same conversations are
 chosen on every run regardless of partitioning or row order.
 
-`--dry-run` never sends requests and never reads the API-key secret. It reports
+`--dry-run` never sends requests, reads the API-key secret, or acknowledges a
+watermark. It reports
 rows read, conversations seen/sampled/kept, converted records, skip counts by
 reason (`missing_session_id`, `missing_identity`, `invalid_event_type`,
 `invalid_timestamp`, `filtered_event`, `sampled_out`, `max_sessions`), and the
-request bytes that would have been sent. Watermark bounds only filter the read:
-the job never stores or advances a watermark in either mode, and reports
-`watermark.advanced = false`, so the caller must not persist progress from a
-dry run.
+request bytes that would have been sent, plus at most three secret-safe,
+built-in-redacted input/output previews. The job computes
+`watermark.snapshot_upper` from the filtered snapshot; after successful live
+delivery it returns that value as `watermark.acknowledged_upper`. The caller
+owns persistence and must not persist progress from a dry run.
+
+Each OTLP request is capped at 900 KiB decompressed JSON and 2,000 spans.
+Retries are bounded by `--max-retries`.
 
 Example:
 

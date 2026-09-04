@@ -29,6 +29,9 @@ from agent_traces_convert import (
 )
 import agent_traces_job
 from agent_traces_job import (
+    MAX_OTLP_REQUEST_BYTES,
+    MAX_OTLP_SPANS,
+    _request_parts,
     _resolve_session_id_column,
     derive_session_id,
     parse_args,
@@ -62,6 +65,30 @@ def mapped_config(**overrides):
     }
     values.update(overrides)
     return ConversionConfig(**values)
+
+
+def otlp_span(record):
+    return record.payload["resourceSpans"][0]["scopeSpans"][0]["spans"][0]
+
+
+def decode_any(value):
+    for key in ("stringValue", "intValue", "doubleValue", "boolValue"):
+        if key in value:
+            return value[key]
+    if "arrayValue" in value:
+        return [decode_any(item) for item in value["arrayValue"]["values"]]
+    if "kvlistValue" in value:
+        return {
+            item["key"]: decode_any(item["value"])
+            for item in value["kvlistValue"]["values"]
+        }
+
+
+def span_attributes(record):
+    return {
+        item["key"]: decode_any(item["value"])
+        for item in otlp_span(record)["attributes"]
+    }
 
 
 class JsonPathTests(unittest.TestCase):
@@ -114,7 +141,7 @@ class MlflowSessionExportTests(unittest.TestCase):
         attributes = {
             item["key"]: item["value"] for item in resource["resource"]["attributes"]
         }
-        return attributes.get("amplitude.session.id")
+        return attributes.get("amplitude.session_id")
 
     def test_row_level_session_is_exported_and_matches_sampling_key(self):
         row = dict(self.row, session_id="session-row")
@@ -207,27 +234,21 @@ class MappedColumnsTests(unittest.TestCase):
             "tool_input": {"password": "do-not-export-by-default"},
         }
 
-    def test_full_is_default_and_insert_id_is_stable(self):
+    def test_full_is_default_and_otlp_ids_are_stable(self):
         first = convert_record(self.row, mapped_config())[0]
         second = convert_record(dict(self.row), mapped_config())[0]
-        self.assertEqual(Protocol.HTTP_V2, first.protocol)
+        self.assertEqual(Protocol.OTLP_JSON, first.protocol)
         self.assertEqual(first.stable_key, second.stable_key)
-        self.assertTrue(first.payload["insert_id"].startswith("dbx-agent-"))
-        self.assertLessEqual(len(first.payload["insert_id"]), 64)
-        self.assertIn(
-            "[Agent] Tool Input", first.payload["event_properties"]
-        )
-        self.assertEqual(
-            "$not-a-path", first.payload["event_properties"]["constant"]
-        )
+        self.assertEqual("a" * 32, otlp_span(first)["traceId"])
+        self.assertEqual("b" * 16, otlp_span(first)["spanId"])
+        self.assertEqual("execute_tool", span_attributes(first)["gen_ai.operation.name"])
+        self.assertIn("gen_ai.tool.call.arguments", span_attributes(first))
 
     def test_metadata_only_strips_content(self):
         record = convert_record(
             self.row, mapped_config(content_mode=ContentMode.METADATA_ONLY)
         )[0]
-        self.assertNotIn(
-            "[Agent] Tool Input", record.payload["event_properties"]
-        )
+        self.assertNotIn("gen_ai.tool.call.arguments", span_attributes(record))
 
     def test_default_full_mode_redacts_builtin_pii_and_base64(self):
         row = dict(
@@ -240,12 +261,14 @@ class MappedColumnsTests(unittest.TestCase):
                 "ssn": "123-45-6789",
                 "ipv4": "10.0.0.1",
                 "ipv6": "2001:db8::1",
+                "bearer": "Bearer abcdefghijklmnopqrstuvwxyz",
+                "openai_key": "sk-abcdefghijklmnopqrstuvwxyz",
                 "image": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
             },
         )
-        tool_input = convert_record(row, mapped_config())[0].payload[
-            "event_properties"
-        ]["[Agent] Tool Input"]
+        tool_input = span_attributes(convert_record(row, mapped_config())[0])[
+            "gen_ai.tool.call.arguments"
+        ]
         self.assertEqual("[email]", tool_input["email"])
         self.assertEqual("[phone]", tool_input["us_phone"])
         self.assertEqual("[phone]", tool_input["intl_phone"])
@@ -253,6 +276,8 @@ class MappedColumnsTests(unittest.TestCase):
         self.assertEqual("[ssn]", tool_input["ssn"])
         self.assertEqual("[ip_address]", tool_input["ipv4"])
         self.assertEqual("[ip_address]", tool_input["ipv6"])
+        self.assertEqual("Bearer [secret]", tool_input["bearer"])
+        self.assertEqual("[secret]", tool_input["openai_key"])
         self.assertEqual("[base64 image redacted]", tool_input["image"])
 
     def test_full_mode_preserves_email_shaped_identity_keys(self):
@@ -268,14 +293,20 @@ class MappedColumnsTests(unittest.TestCase):
             tool_input={"email": "secret@example.com"},
         )
         record = convert_record(row, mapped_config(mapping=mapping))[0]
-        self.assertEqual("person@example.com", record.payload["user_id"])
         self.assertEqual(
-            "thread@example.com",
-            record.payload["event_properties"]["[Agent] Session ID"],
+            "person@example.com", span_attributes(record)["enduser.id"]
         )
         self.assertEqual(
-            "[email]",
-            record.payload["event_properties"]["[Agent] Tool Input"]["email"],
+            "thread@example.com", span_attributes(record)["amplitude.session_id"]
+        )
+        self.assertEqual(
+            "thread@example.com", span_attributes(record)["gen_ai.conversation.id"]
+        )
+        self.assertEqual(
+            "thread@example.com", span_attributes(record)["session.id"]
+        )
+        self.assertEqual(
+            "[email]", span_attributes(record)["gen_ai.tool.call.arguments"]["email"]
         )
 
     def test_redaction_can_be_disabled_and_custom_patterns_apply(self):
@@ -289,7 +320,7 @@ class MappedColumnsTests(unittest.TestCase):
         )[0]
         self.assertEqual(
             "user@example.com account [REDACTED]",
-            record.payload["event_properties"]["[Agent] Tool Input"],
+            span_attributes(record)["gen_ai.tool.call.arguments"],
         )
 
     def test_redacts_llm_message_content(self):
@@ -298,11 +329,15 @@ class MappedColumnsTests(unittest.TestCase):
             MAPPING["event_properties"],
             **{"$llm_message": "$.llm_message"},
         )
-        row = dict(self.row, llm_message={"text": "Contact user@example.com"})
+        row = dict(
+            self.row,
+            type="[Agent] AI Response",
+            llm_message={"text": "Contact user@example.com"},
+        )
         record = convert_record(row, mapped_config(mapping=mapping))[0]
         self.assertEqual(
             "Contact [email]",
-            record.payload["event_properties"]["$llm_message"]["text"],
+            span_attributes(record)["gen_ai.output.messages"][0]["content"],
         )
 
     def test_session_end_is_filtered(self):
@@ -321,7 +356,7 @@ class MappedColumnsTests(unittest.TestCase):
         )[0]
         self.assertEqual(
             "customer-v1",
-            record.payload["event_properties"]["[Agent] Source Format"],
+            record.payload["resourceSpans"][0]["scopeSpans"][0]["scope"]["name"],
         )
 
     def test_insert_id_changes_with_payload(self):
@@ -332,11 +367,23 @@ class MappedColumnsTests(unittest.TestCase):
         self.assertLessEqual(len(stable_insert_id(event)), 64)
         self.assertTrue(stable_insert_id(event).startswith("dbx-agent-"))
 
-    def test_datetime_timestamp_maps_to_http_v2_millis(self):
+    def test_datetime_timestamp_maps_to_otlp_nanos(self):
         when = dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=dt.timezone.utc)
         row = dict(self.row, timestamp=when)
         record = convert_record(row, mapped_config())[0]
-        self.assertEqual(1_767_268_800_000, record.payload["time"])
+        self.assertEqual(
+            str(1_767_268_800_000 * 1_000_000),
+            otlp_span(record)["startTimeUnixNano"],
+        )
+
+    def test_missing_ids_are_deterministic_valid_hex(self):
+        row = dict(self.row, trace_id=None, span_id=None)
+        first = otlp_span(convert_record(row, mapped_config())[0])
+        second = otlp_span(convert_record(dict(row), mapped_config())[0])
+        self.assertRegex(first["traceId"], r"^[0-9a-f]{32}$")
+        self.assertRegex(first["spanId"], r"^[0-9a-f]{16}$")
+        self.assertEqual(first["traceId"], second["traceId"])
+        self.assertEqual(first["spanId"], second["spanId"])
 
 
 class MlflowUcTests(unittest.TestCase):
@@ -375,7 +422,7 @@ class MlflowUcTests(unittest.TestCase):
         )
         converted = convert_record(self.row, config)[0]
         self.assertEqual(Protocol.OTLP_JSON, converted.protocol)
-        self.assertEqual(self.row["trace_id"], converted.stable_key)
+        self.assertEqual(self.row["trace_id"] + ":0", converted.stable_key)
         resource = converted.payload["resourceSpans"][0]
         attributes = {
             item["key"]: item["value"]
@@ -383,7 +430,7 @@ class MlflowUcTests(unittest.TestCase):
         }
         self.assertIn("gen_ai.request.model", attributes)
         self.assertIn("gen_ai.usage.prompt_tokens", attributes)
-        self.assertIn("tokens", attributes)
+        self.assertNotIn("tokens", attributes)
         self.assertNotIn("gen_ai.prompt", attributes)
         resource_keys = {
             item["key"] for item in resource["resource"]["attributes"]
@@ -457,6 +504,42 @@ class MlflowUcTests(unittest.TestCase):
         second = convert_record(other, config)[0]
         combined = combine_payloads(Protocol.OTLP_JSON, [first, second])
         self.assertEqual(2, len(combined["resourceSpans"]))
+
+    def test_normalizes_mlflow_llm_input_output_for_receiver(self):
+        row = dict(self.row)
+        row["spans"] = [
+            dict(
+                self.row["spans"][0],
+                span_type="LLM",
+                inputs={"messages": [{"role": "user", "content": "hello"}]},
+                outputs={"content": "world"},
+            )
+        ]
+        record = convert_record(
+            row, ConversionConfig(source_format=SourceFormat.MLFLOW_UC)
+        )[0]
+        attrs = span_attributes(record)
+        self.assertEqual("chat", attrs["gen_ai.operation.name"])
+        self.assertEqual("hello", attrs["gen_ai.input.messages"][0]["content"])
+        self.assertEqual("world", attrs["gen_ai.output.messages"][0]["content"])
+
+    def test_session_and_user_column_overrides_are_exported(self):
+        row = dict(self.row, custom_session="override-s", custom_user="override-u")
+        config = ConversionConfig(
+            source_format=SourceFormat.MLFLOW_UC,
+            session_id_column="custom_session",
+            user_id_column="custom_user",
+        )
+        resource = convert_record(row, config)[0].payload["resourceSpans"][0]
+        attrs = {
+            item["key"]: decode_any(item["value"])
+            for item in resource["resource"]["attributes"]
+        }
+        self.assertEqual("override-s", canonical_session_id(row, config))
+        self.assertEqual("override-s", attrs["amplitude.session_id"])
+        self.assertEqual("override-s", attrs["gen_ai.conversation.id"])
+        self.assertEqual("override-s", attrs["session.id"])
+        self.assertEqual("override-u", attrs["enduser.id"])
 
 
 class _FakeSchema:
@@ -550,7 +633,8 @@ class JobOptionsTests(unittest.TestCase):
         self.assertTrue(args.redact_pii)
         self.assertEqual(1.0, args.sample_rate)
         self.assertIsNone(args.max_sessions)
-        self.assertIsNone(args.protocol)
+        self.assertEqual(MAX_OTLP_REQUEST_BYTES, args.max_request_bytes)
+        self.assertIsNone(args.user_id_column)
 
     def test_validates_sampling_and_custom_patterns(self):
         with self.assertRaisesRegex(ValueError, "sample-rate"):
@@ -565,6 +649,24 @@ class JobOptionsTests(unittest.TestCase):
                     "0",
                 ]
             )
+
+    def test_enforces_otlp_request_limits(self):
+        for option, value in (
+            ("--chunk-size", str(MAX_OTLP_SPANS + 1)),
+            ("--max-request-bytes", str(MAX_OTLP_REQUEST_BYTES + 1)),
+        ):
+            with self.assertRaisesRegex(ValueError, "cannot exceed"):
+                parse_args(
+                    [
+                        "--table",
+                        "t",
+                        "--format",
+                        "mlflow-uc",
+                        "--dry-run",
+                        option,
+                        value,
+                    ]
+                )
         with self.assertRaisesRegex(ValueError, "custom redaction"):
             parse_args(
                 [
@@ -832,7 +934,7 @@ class JobOptionsTests(unittest.TestCase):
         self.assertGreater(stats[0]["bytes_would_send"], 0)
         self.assertEqual(0, stats[0]["requests_sent"])
 
-    def test_protocol_override_rejects_mismatched_payload_protocol(self):
+    def test_otlp_request_uses_bearer_and_no_body_key(self):
         case = MappedColumnsTests()
         case.setUp()
         conversion = {
@@ -853,15 +955,16 @@ class JobOptionsTests(unittest.TestCase):
             "initial_backoff_seconds": 0,
             "request_timeout_seconds": 1,
             "dry_run": True,
-            "protocol": "otlp-json",
         }
-        with self.assertRaisesRegex(ValueError, "protocol override"):
-            list(process_partition(0, [case.row], conversion, delivery))
-
-        delivery["protocol"] = "http-v2"
         stats = list(process_partition(0, [case.row], conversion, delivery))
         self.assertEqual(1, stats[0]["records_converted"])
         self.assertEqual(1, stats[0]["requests_would_send"])
+        record = convert_record(case.row, mapped_config())[0]
+        config = agent_traces_job.DeliveryConfig(**dict(delivery, api_key="secret"))
+        url, body, headers = _request_parts(Protocol.OTLP_JSON, [record], config)
+        self.assertTrue(url.endswith("/v1/traces"))
+        self.assertEqual({"Authorization": "Bearer secret"}, headers)
+        self.assertNotIn("api_key", body)
 
     def test_skips_are_bucketed_by_conversion_reason(self):
         case = MappedColumnsTests()
@@ -968,7 +1071,9 @@ class DryRunTests(unittest.TestCase):
             {
                 "column": "updated_at",
                 "start_exclusive": "2026-01-01",
-                "end_inclusive": "2026-02-01",
+                "end_inclusive": None,
+                "snapshot_upper": "2026-02-01",
+                "acknowledged_upper": None,
                 "advanced": False,
             },
             result["watermark"],
@@ -1006,6 +1111,27 @@ class DryRunTests(unittest.TestCase):
         finally:
             agent_traces_job._apply_session_selection = original
         self.assertEqual("dry_run", result["status"])
+
+
+class DeliveryEncodingTests(unittest.TestCase):
+    def test_retry_after_is_capped(self):
+        self.assertEqual(
+            60.0, agent_traces_job._retry_after_seconds({"Retry-After": "3600"})
+        )
+
+    def test_otlp_partial_success_rejected_spans(self):
+        self.assertEqual(
+            3,
+            agent_traces_job._otlp_rejected_spans(
+                b'{"partialSuccess":{"rejectedSpans":3}}'
+            ),
+        )
+        self.assertEqual(0, agent_traces_job._otlp_rejected_spans(b""))
+
+    def test_chunk_size_encoding_matches_post_encoding(self):
+        encoded = agent_traces_job._encode_otlp_json({"name": "café"})
+        self.assertIn(b"caf\xc3\xa9", encoded)
+        self.assertNotIn(b"caf\\u00e9", encoded)
 
 
 if __name__ == "__main__":

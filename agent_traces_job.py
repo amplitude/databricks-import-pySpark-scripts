@@ -33,16 +33,15 @@ from agent_traces_convert import (
 )
 
 
-HTTP_V2_ENDPOINTS = {
-    "US": "https://api2.amplitude.com/2/httpapi",
-    "EU": "https://api.eu.amplitude.com/2/httpapi",
-}
 OTLP_ENDPOINTS = {
     "US": "https://api2.amplitude.com/v1/traces",
     "EU": "https://api.eu.amplitude.com/v1/traces",
 }
 RESULT_PREFIX = "AGENT_TRACES_JOB_RESULT="
 MAX_MAPPING_BYTES = 1_048_576
+MAX_OTLP_REQUEST_BYTES = 900 * 1024
+MAX_OTLP_SPANS = 2000
+MAX_RETRY_AFTER_SECONDS = 60.0
 
 
 @dataclasses.dataclass(frozen=True)
@@ -137,6 +136,10 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--user-id-column",
+        help="Optional top-level user ID column exported as enduser.id.",
+    )
+    parser.add_argument(
         "--no-strict-essentials",
         dest="strict_essentials",
         action="store_false",
@@ -144,11 +147,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable canonical event identity validation (migration escape hatch)",
     )
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument(
-        "--protocol",
-        choices=tuple(item.value for item in Protocol),
-        help="Delivery protocol override (default inferred from source format)",
-    )
     parser.add_argument(
         "--result-path",
         help="Optional dbutils/local path for the machine-readable run result",
@@ -160,7 +158,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--server-zone", choices=("US", "EU"), default="US")
     parser.add_argument("--chunk-size", type=int, default=100)
-    parser.add_argument("--max-request-bytes", type=int, default=1_000_000)
+    parser.add_argument("--max-request-bytes", type=int, default=MAX_OTLP_REQUEST_BYTES)
     parser.add_argument("--max-retries", type=int, default=5)
     parser.add_argument("--initial-backoff-seconds", type=float, default=1.0)
     parser.add_argument("--request-timeout-seconds", type=float, default=30.0)
@@ -186,6 +184,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace
     for field in ("chunk_size", "max_request_bytes"):
         if getattr(args, field) <= 0:
             raise ValueError("--{} must be positive".format(field.replace("_", "-")))
+    if args.chunk_size > MAX_OTLP_SPANS:
+        raise ValueError("--chunk-size cannot exceed {}".format(MAX_OTLP_SPANS))
+    if args.max_request_bytes > MAX_OTLP_REQUEST_BYTES:
+        raise ValueError(
+            "--max-request-bytes cannot exceed {}".format(MAX_OTLP_REQUEST_BYTES)
+        )
     if args.max_retries < 0:
         raise ValueError("--max-retries cannot be negative")
     if args.initial_backoff_seconds < 0 or args.request_timeout_seconds <= 0:
@@ -292,6 +296,16 @@ def _resolve_session_id_column(data_frame: Any, args: argparse.Namespace) -> Opt
     return None
 
 
+def _validate_override_columns(data_frame: Any, args: argparse.Namespace) -> None:
+    fields = {field.name for field in data_frame.schema.fields}
+    for option, column in (
+        ("session ID", args.session_id_column),
+        ("user ID", args.user_id_column),
+    ):
+        if column and column not in fields:
+            raise ValueError("{} column {!r} is not in the source schema".format(option, column))
+
+
 def _conversion_config(values: Mapping[str, Any]) -> ConversionConfig:
     return ConversionConfig(
         source_format=SourceFormat(values["source_format"]),
@@ -301,6 +315,8 @@ def _conversion_config(values: Mapping[str, Any]) -> ConversionConfig:
         strict_essentials=bool(values["strict_essentials"]),
         redact_pii=bool(values["redact_pii"]),
         custom_redaction_patterns=tuple(values.get("custom_redaction_patterns", ())),
+        session_id_column=values.get("session_id_column"),
+        user_id_column=values.get("user_id_column"),
     )
 
 
@@ -513,15 +529,41 @@ def _retry_after_seconds(headers: Any) -> Optional[float]:
     if not value:
         return None
     try:
-        return max(0.0, float(value))
+        delay = max(0.0, float(value))
     except ValueError:
         try:
             when = email.utils.parsedate_to_datetime(value)
             if when.tzinfo is None:
                 when = when.replace(tzinfo=dt.timezone.utc)
-            return max(0.0, (when - dt.datetime.now(dt.timezone.utc)).total_seconds())
+            delay = max(0.0, (when - dt.datetime.now(dt.timezone.utc)).total_seconds())
         except (TypeError, ValueError):
             return None
+    return min(delay, MAX_RETRY_AFTER_SECONDS)
+
+
+def _encode_otlp_json(body: Mapping[str, Any]) -> bytes:
+    return json.dumps(
+        body, separators=(",", ":"), ensure_ascii=False, default=str
+    ).encode("utf-8")
+
+
+def _otlp_rejected_spans(body_bytes: bytes) -> int:
+    if not body_bytes:
+        return 0
+    try:
+        payload = json.loads(body_bytes.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return 0
+    if not isinstance(payload, Mapping):
+        return 0
+    partial = payload.get("partialSuccess") or payload.get("partial_success") or {}
+    if not isinstance(partial, Mapping):
+        return 0
+    rejected = partial.get("rejectedSpans", partial.get("rejected_spans", 0))
+    try:
+        return max(0, int(rejected))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _post_json(
@@ -531,9 +573,7 @@ def _post_json(
     config: DeliveryConfig,
     sleep: Any = time.sleep,
 ) -> Tuple[int, int]:
-    encoded = json.dumps(
-        body, separators=(",", ":"), ensure_ascii=False, default=str
-    ).encode("utf-8")
+    encoded = _encode_otlp_json(body)
     request_headers = {"Content-Type": "application/json"}
     request_headers.update(headers)
     attempts = 0
@@ -547,8 +587,15 @@ def _post_json(
                 request, timeout=config.request_timeout_seconds
             ) as response:
                 status = int(response.status)
-                response.read()
+                response_body = response.read(64 * 1024)
             if 200 <= status < 300:
+                rejected = _otlp_rejected_spans(response_body)
+                if rejected:
+                    raise RuntimeError(
+                        "Amplitude OTLP partial success rejected {} span(s)".format(
+                            rejected
+                        )
+                    )
                 return len(encoded), attempts
             error_status = status
             retry_after = None
@@ -556,7 +603,7 @@ def _post_json(
             error_status = int(exc.code)
             retry_after = _retry_after_seconds(exc.headers)
             # Consume and discard the bounded service error response.  Never log
-            # the request body because HTTP V2 contains the API key.
+            # the request body because it can contain customer content.
             exc.read(64 * 1024)
         except (urllib.error.URLError, TimeoutError, OSError):
             error_status = 0
@@ -584,21 +631,13 @@ def _request_parts(
     records: List[ConvertedRecord],
     delivery: DeliveryConfig,
 ) -> Tuple[str, Mapping[str, Any], Mapping[str, str]]:
+    if protocol != Protocol.OTLP_JSON:
+        raise ValueError("only OTLP JSON delivery is supported")
     body = dict(combine_payloads(protocol, records))
-    if protocol == Protocol.HTTP_V2:
-        # HTTP V2 authenticates in the body.  The body is never logged.
-        body["api_key"] = delivery.api_key
-        # Intake defaults min_id_length to 5 and drops shorter ids. Warehouse
-        # identities are frequently short numerics, so accept them explicitly.
-        body["options"] = {"min_id_length": 1}
-        return HTTP_V2_ENDPOINTS[delivery.server_zone], body, {}
     return (
         OTLP_ENDPOINTS[delivery.server_zone],
         body,
-        {
-            "Authorization": "Api-Key {}".format(delivery.api_key),
-            "x-api-key": str(delivery.api_key),
-        },
+        {"Authorization": "Bearer {}".format(delivery.api_key)},
     )
 
 
@@ -612,9 +651,7 @@ def _deliver_chunk(
         raise ValueError("a delivery chunk cannot mix protocols")
     url, body, headers = _request_parts(protocol, records, delivery)
     if delivery.dry_run:
-        encoded = json.dumps(
-            body, separators=(",", ":"), ensure_ascii=False, default=str
-        ).encode("utf-8")
+        encoded = _encode_otlp_json(body)
         return len(encoded), 0
     return _post_json(url, body, headers, delivery)
 
@@ -627,10 +664,7 @@ def _would_exceed_bytes(
     if not records:
         return False
     _, body, _ = _request_parts(records[0].protocol, records + [candidate], delivery)
-    size = len(
-        json.dumps(body, separators=(",", ":"), default=str).encode("utf-8")
-    )
-    return size > delivery.max_request_bytes
+    return len(_encode_otlp_json(body)) > delivery.max_request_bytes
 
 
 def _conversion_outcome(
@@ -655,23 +689,81 @@ def _conversion_outcome(
     return list(records), counts
 
 
+def _decode_otlp_value(value: Any) -> Any:
+    if not isinstance(value, Mapping):
+        return value
+    for key in ("stringValue", "intValue", "doubleValue", "boolValue", "bytesValue"):
+        if key in value:
+            return value[key]
+    if "arrayValue" in value:
+        return [
+            _decode_otlp_value(item)
+            for item in value["arrayValue"].get("values", [])
+        ]
+    if "kvlistValue" in value:
+        return {
+            item.get("key"): _decode_otlp_value(item.get("value"))
+            for item in value["kvlistValue"].get("values", [])
+        }
+    return None
+
+
+def _record_previews(
+    record: ConvertedRecord, conversion: ConversionConfig
+) -> List[Mapping[str, Any]]:
+    """Extract secret-safe content previews from an already-redacted OTLP span."""
+    from agent_traces_convert import _redact_content
+
+    previews: List[Mapping[str, Any]] = []
+    preview_keys = {
+        "gen_ai.operation.name": "operation",
+        "gen_ai.input.messages": "input",
+        "gen_ai.output.messages": "output",
+        "gen_ai.tool.call.arguments": "input",
+        "gen_ai.tool.call.result": "output",
+    }
+    for resource in record.payload.get("resourceSpans", []):
+        for scope in resource.get("scopeSpans", []):
+            for span in scope.get("spans", []):
+                preview: Dict[str, Any] = {}
+                for attribute in span.get("attributes", []):
+                    label = preview_keys.get(attribute.get("key"))
+                    if label and label not in preview:
+                        decoded = _decode_otlp_value(attribute.get("value"))
+                        if label == "operation":
+                            preview[label] = decoded
+                            continue
+                        preview[label] = _redact_content(
+                            decoded, True, conversion.custom_redaction_patterns
+                        )
+                if preview:
+                    previews.append(preview)
+    return previews
+
+
+def _truncate_preview(value: Any, max_chars: int = 500) -> Any:
+    if isinstance(value, str):
+        return value if len(value) <= max_chars else value[:max_chars] + "…"
+    if isinstance(value, list):
+        return [_truncate_preview(item, max_chars) for item in value[:10]]
+    if isinstance(value, Mapping):
+        return {
+            key: _truncate_preview(item, max_chars)
+            for key, item in list(value.items())[:10]
+        }
+    return value
+
+
 def process_partition(
     partition_id: int,
     rows: Iterable[Any],
     conversion_values: Mapping[str, Any],
     delivery_values: Mapping[str, Any],
-) -> Iterator[Mapping[str, int]]:
+) -> Iterator[Mapping[str, Any]]:
     """Convert and deliver one Spark partition, yielding one small stats row."""
     conversion = _conversion_config(conversion_values)
-    protocol_override = delivery_values.get("protocol")
-    if protocol_override is not None:
-        protocol_override = Protocol(protocol_override)
     delivery = DeliveryConfig(
-        **{
-            key: value
-            for key, value in delivery_values.items()
-            if key != "protocol"
-        }
+        **delivery_values
     )
     stats = {
         "partition_id": partition_id,
@@ -684,6 +776,7 @@ def process_partition(
         "bytes_would_send": 0,
         "attempts": 0,
         "skipped_by_reason": {},
+        "previews": [],
     }
     pending: List[ConvertedRecord] = []
 
@@ -713,11 +806,14 @@ def process_partition(
             continue
         stats["records_converted"] += len(converted)
         for record in converted:
-            if protocol_override is not None and protocol_override != record.protocol:
-                raise ValueError(
-                    "protocol override {!r} does not match converted payload protocol {!r}".format(
-                        protocol_override.value, record.protocol.value
-                    )
+            if delivery.dry_run and len(stats["previews"]) < 3:
+                stats["previews"].extend(
+                    [
+                        _truncate_preview(preview)
+                        for preview in _record_previews(record, conversion)[
+                            : 3 - len(stats["previews"])
+                        ]
+                    ]
                 )
             if pending and (
                 pending[0].protocol != record.protocol
@@ -761,14 +857,38 @@ def _sum_stats(partition_stats: Iterable[Mapping[str, Any]]) -> Dict[str, Any]:
     totals: Dict[str, Any] = {"partitions": 0}
     totals.update({key: 0 for key in counters})
     skipped: Dict[str, int] = {}
+    previews: List[Mapping[str, Any]] = []
     for item in partition_stats:
         totals["partitions"] += 1
         for key in counters:
             totals[key] += int(item.get(key, 0))
         for reason, count in dict(item.get("skipped_by_reason") or {}).items():
             skipped[str(reason)] = skipped.get(str(reason), 0) + int(count)
+        if len(previews) < 3:
+            previews.extend(list(item.get("previews") or ())[: 3 - len(previews)])
     totals["skipped_by_reason"] = skipped
+    totals["previews"] = previews
     return totals
+
+
+def _snapshot_watermark_upper(
+    data_frame: Any, args: argparse.Namespace
+) -> Tuple[Any, Optional[str]]:
+    if not args.watermark_column:
+        return data_frame, None
+    if hasattr(data_frame, "cache"):
+        data_frame = data_frame.cache()
+    try:
+        from pyspark.sql import functions
+
+        rows = data_frame.agg(
+            functions.max(functions.col(args.watermark_column)).alias("upper")
+        ).collect()
+        value = rows[0]["upper"] if rows else None
+        return data_frame, None if value is None else str(value)
+    except (AttributeError, TypeError):
+        # Driver-only test doubles do not implement aggregate Spark actions.
+        return data_frame, args.watermark_end
 
 
 def _source_descriptor(args: argparse.Namespace) -> Mapping[str, str]:
@@ -841,8 +961,12 @@ def run(
         "custom_redaction_patterns": _parse_custom_redaction_patterns(
             args.custom_redaction_patterns_json
         ),
+        "session_id_column": args.session_id_column,
+        "user_id_column": args.user_id_column,
     }
     data_frame = _apply_watermarks(_read_source(spark, args), args)
+    _validate_override_columns(data_frame, args)
+    data_frame, watermark_upper = _snapshot_watermark_upper(data_frame, args)
     data_frame, session_stats = _apply_session_selection(
         data_frame, args, conversion_values
     )
@@ -867,8 +991,6 @@ def run(
             dry_run=args.dry_run,
         )
     )
-    if args.protocol is not None:
-        delivery_values["protocol"] = args.protocol
     started = dt.datetime.now(dt.timezone.utc)
     partition_stats = data_frame.rdd.mapPartitionsWithIndex(
         lambda partition_id, rows: process_partition(
@@ -901,16 +1023,27 @@ def run(
         "sample_rate": args.sample_rate,
         "max_sessions": args.max_sessions,
         "session_id_column": session_stats["session_id_column"],
+        "user_id_column": args.user_id_column,
         "strict_essentials": bool(args.strict_essentials),
         "server_zone": args.server_zone,
-        # Watermark bounds only filter the read. This job never stores or
-        # advances a watermark, in dry-run or in delivery mode; the caller owns
-        # persistence and must not persist anything from a dry run.
+        # This job does not persist a warehouse cursor. After live delivery it
+        # reports the snapshot max as acknowledged_upper / end_inclusive so
+        # Falcon can advance; dry-run leaves those null.
         "watermark": {
             "column": args.watermark_column,
             "start_exclusive": args.watermark_start,
-            "end_inclusive": args.watermark_end,
-            "advanced": False,
+            "end_inclusive": (
+                watermark_upper if not args.dry_run else None
+            ),
+            "snapshot_upper": watermark_upper,
+            "acknowledged_upper": (
+                watermark_upper if not args.dry_run and watermark_upper is not None else None
+            ),
+            "advanced": bool(
+                not args.dry_run
+                and args.watermark_column
+                and watermark_upper is not None
+            ),
         },
         "started_at": started.isoformat(),
         "completed_at": completed.isoformat(),

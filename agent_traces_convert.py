@@ -52,7 +52,6 @@ class ContentMode(str, enum.Enum):
 
 
 class Protocol(str, enum.Enum):
-    HTTP_V2 = "http-v2"
     OTLP_JSON = "otlp-json"
 
 
@@ -65,6 +64,8 @@ class ConversionConfig:
     strict_essentials: bool = True
     redact_pii: bool = True
     custom_redaction_patterns: Tuple[str, ...] = ()
+    session_id_column: Optional[str] = None
+    user_id_column: Optional[str] = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -80,6 +81,10 @@ _TRACE_ID = "[Agent] Trace ID"
 _SPAN_ID = "[Agent] Span ID"
 _SESSION_ID = "[Agent] Session ID"
 _SESSION_END = "[Agent] Session End"
+_USER_MESSAGE = "[Agent] User Message"
+_AI_RESPONSE = "[Agent] AI Response"
+_TOOL_CALL = "[Agent] Tool Call"
+_SPAN = "[Agent] Span"
 # Must stay in sync with Langley's _mlflow_session_id so sampling groups rows by
 # the same key the converter ultimately assigns as the session.
 _MLFLOW_SESSION_KEYS = (
@@ -88,9 +93,28 @@ _MLFLOW_SESSION_KEYS = (
     "conversation_id",
     "conversationId",
     "amplitude.session.id",
+    "amplitude.session_id",
     "gen_ai.conversation.id",
+    "gen_ai.session.id",
+    "session.id",
     "mlflow.trace.session",
 )
+# OtlpTraceTranslator reads these in order; emit all three so mapped and
+# MLflow rows resolve the same Amplitude session.
+_RECEIVER_SESSION_KEYS = (
+    "gen_ai.conversation.id",
+    "session.id",
+    "amplitude.session_id",
+)
+
+
+def _apply_session_attributes(attributes: Dict[str, Any], session_id: Any) -> None:
+    if session_id is None:
+        return
+    for key in _RECEIVER_SESSION_KEYS:
+        attributes[key] = session_id
+
+
 _IDENTITY_KEYS = frozenset(
     {
         "user_id",
@@ -99,7 +123,9 @@ _IDENTITY_KEYS = frozenset(
         "deviceid",
         "enduser.id",
         "amplitude.session.id",
+        "amplitude.session_id",
         "gen_ai.conversation.id",
+        "session.id",
         "session_id",
         "sessionid",
         "conversation_id",
@@ -163,9 +189,46 @@ _SENSITIVE_KEY_PARTS = (
     "tool.arguments",
     "tool.result",
 )
+_SECRET_KEY_PARTS = frozenset(
+    ("api_key", "apikey", "authorization", "credential", "password", "secret", "token")
+)
+_METADATA_ATTRIBUTE_ALLOWLIST = frozenset(
+    {
+        "gen_ai.operation.name",
+        "gen_ai.provider.name",
+        "gen_ai.system",
+        "gen_ai.request.model",
+        "gen_ai.response.model",
+        "gen_ai.response.id",
+        "gen_ai.response.finish_reason",
+        "gen_ai.response.finish_reasons",
+        "gen_ai.usage.input_tokens",
+        "gen_ai.usage.output_tokens",
+        "gen_ai.usage.reasoning.output_tokens",
+        "gen_ai.usage.cache_read.input_tokens",
+        "gen_ai.usage.cache_creation.input_tokens",
+        "gen_ai.usage.cost",
+        "gen_ai.conversation.id",
+        "session.id",
+        "amplitude.session_id",
+        "enduser.id",
+        "gen_ai.agent.id",
+        "deployment.environment",
+        "service.name",
+        "openinference.span.kind",
+        "llm.model_name",
+        "llm.token_count.prompt",
+        "llm.token_count.completion",
+        "llm.system",
+        "mlflow.spanType",
+    }
+)
 _CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 _REDACTED_BASE64 = "[base64 image redacted]"
 _BUILTIN_REDACTIONS = (
+    (r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}", "Bearer [secret]"),
+    (r"\b(?:sk|rk|pk)-[A-Za-z0-9_-]{12,}\b", "[secret]"),
+    (r"\bAKIA[0-9A-Z]{16}\b", "[secret]"),
     (r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b", "[email]"),
     (r"(?<!\d)\(?([0-9]{3})\)?[-. ]?([0-9]{3})[-. ]?([0-9]{4})(?!\d)", "[phone]"),
     (r"\b(?:\d{4}[-\s]?){3}\d{4}\b", "[credit_card]"),
@@ -288,12 +351,18 @@ def _redact_content(
     if isinstance(value, str):
         return _redact_text(value, redact_pii, custom_patterns)
     if isinstance(value, Mapping):
-        return {
-            key: item
-            if _is_identity_key(str(key))
-            else _redact_content(item, redact_pii, custom_patterns)
-            for key, item in value.items()
-        }
+        output = {}
+        for key, item in value.items():
+            key_text = str(key)
+            lowered = _CAMEL_BOUNDARY.sub("_", key_text).lower()
+            parts = set(re.split(r"[^a-z0-9]+", lowered))
+            if _is_identity_key(key_text):
+                output[key] = item
+            elif parts & _SECRET_KEY_PARTS:
+                output[key] = "[secret]"
+            else:
+                output[key] = _redact_content(item, redact_pii, custom_patterns)
+        return output
     if isinstance(value, list):
         return [
             _redact_content(item, redact_pii, custom_patterns) for item in value
@@ -302,7 +371,7 @@ def _redact_content(
 
 
 def stable_insert_id(event: Mapping[str, Any]) -> str:
-    """Return a deterministic insert_id for replay-safe HTTP V2 imports."""
+    """Return a deterministic replay key for mapped imports."""
     material = dict(event)
     material.pop("insert_id", None)
     digest = hashlib.sha256(canonical_json(material).encode("utf-8")).hexdigest()
@@ -415,7 +484,26 @@ def _metadata_only_event(event: Dict[str, Any]) -> None:
         event["event_properties"] = {
             key: value
             for key, value in properties.items()
-            if key not in _SENSITIVE_AGENT_PROPERTIES
+            if _is_identity_key(str(key))
+            or key
+            in {
+                _AGENT_ID,
+                _TRACE_ID,
+                _SPAN_ID,
+                _SESSION_ID,
+                "[Agent] Parent Span ID",
+                "[Agent] Model Name",
+                "[Agent] Model Provider",
+                "[Agent] Input Tokens",
+                "[Agent] Output Tokens",
+                "[Agent] Latency Ms",
+                "[Agent] Is Error",
+                "[Agent] Tool Name",
+                "[Agent] Invocation ID",
+                "[Agent] Span Name",
+                "[Agent] Environment",
+                "[Agent] Source Format",
+            }
         }
 
 
@@ -439,11 +527,123 @@ def _validate_http_event(event: Mapping[str, Any], strict: bool) -> None:
     properties = event.get("event_properties")
     if not isinstance(properties, Mapping):
         raise ConversionError("strict essentials require event_properties")
-    for key in (_AGENT_ID, _TRACE_ID):
-        if not properties.get(key):
-            raise ConversionError("strict essentials require {!r}".format(key))
-    if event_type in ("[Agent] Span", "[Agent] Tool Call") and not properties.get(_SPAN_ID):
-        raise ConversionError("{} requires {!r}".format(event_type, _SPAN_ID))
+    if not properties.get(_AGENT_ID):
+        raise ConversionError("strict essentials require {!r}".format(_AGENT_ID))
+
+
+def _derived_hex(value: Any, length: int, material: Any) -> str:
+    if value is not None and str(value).strip():
+        return _to_hex_id(value, length // 2, "identifier")
+    return hashlib.sha256(canonical_json(material).encode("utf-8")).hexdigest()[:length]
+
+
+def _agent_message_text(value: Any) -> Any:
+    if isinstance(value, Mapping) and "text" in value:
+        return value["text"]
+    return value
+
+
+def _mapped_otlp_span(event: Mapping[str, Any], config: ConversionConfig) -> Mapping[str, Any]:
+    properties = dict(event.get("event_properties") or {})
+    event_type = event["event_type"]
+    time_millis = _http_v2_time(event.get("time"))
+    trace_material = {
+        "session": properties.get(_SESSION_ID),
+        "user": event.get("user_id") or event.get("device_id"),
+        "event": event,
+    }
+    trace_id = _derived_hex(properties.get(_TRACE_ID), 32, trace_material)
+    span_id = _derived_hex(properties.get(_SPAN_ID), 16, event)
+    operation = {
+        _USER_MESSAGE: "chat",
+        _AI_RESPONSE: "chat",
+        _TOOL_CALL: "execute_tool",
+    }.get(event_type, "span")
+    attrs: Dict[str, Any] = {"gen_ai.operation.name": operation}
+
+    aliases = {
+        _AGENT_ID: "gen_ai.agent.id",
+        "[Agent] Model Name": "gen_ai.response.model",
+        "[Agent] Model Provider": "gen_ai.provider.name",
+        "[Agent] Input Tokens": "gen_ai.usage.input_tokens",
+        "[Agent] Output Tokens": "gen_ai.usage.output_tokens",
+        "[Agent] Reasoning Tokens": "gen_ai.usage.reasoning.output_tokens",
+        "[Agent] Cache Read Tokens": "gen_ai.usage.cache_read.input_tokens",
+        "[Agent] Cache Creation Tokens": "gen_ai.usage.cache_creation.input_tokens",
+        "[Agent] Cost USD": "gen_ai.usage.cost",
+        "[Agent] Provider Request ID": "gen_ai.response.id",
+        "[Agent] Finish Reason": "gen_ai.response.finish_reason",
+        "[Agent] System Prompt": "gen_ai.system_instructions",
+        "[Agent] Tool Name": "gen_ai.tool.name",
+        "[Agent] Invocation ID": "gen_ai.tool.call.id",
+        "[Agent] Tool Input": "gen_ai.tool.call.arguments",
+        "[Agent] Tool Output": "gen_ai.tool.call.result",
+        "[Agent] Environment": "deployment.environment",
+    }
+    for source, target in aliases.items():
+        if properties.get(source) is not None:
+            attrs[target] = properties[source]
+    _apply_session_attributes(attrs, properties.get(_SESSION_ID))
+    identity = event.get("user_id") or event.get("device_id")
+    if identity is not None:
+        attrs["enduser.id"] = identity
+    message = _agent_message_text(properties.get("$llm_message"))
+    if message is not None:
+        if event_type == _USER_MESSAGE:
+            attrs["gen_ai.input.messages"] = [{"role": "user", "content": message}]
+        elif event_type == _AI_RESPONSE:
+            attrs["gen_ai.output.messages"] = [{"role": "assistant", "content": message}]
+    if "gen_ai.input.messages" not in attrs and properties.get("[Agent] Input State") is not None:
+        attrs["gen_ai.input.messages"] = properties["[Agent] Input State"]
+    if "gen_ai.output.messages" not in attrs and properties.get("[Agent] Output State") is not None:
+        attrs["gen_ai.output.messages"] = properties["[Agent] Output State"]
+    if event_type == _SPAN and properties.get("[Agent] Span Name"):
+        name = str(properties["[Agent] Span Name"])
+    else:
+        name = event_type
+
+    status: Dict[str, Any] = {
+        "code": "STATUS_CODE_ERROR"
+        if properties.get("[Agent] Is Error")
+        else "STATUS_CODE_OK"
+    }
+    if properties.get("[Agent] Error Message"):
+        status["message"] = properties["[Agent] Error Message"]
+    span: Dict[str, Any] = {
+        "traceId": trace_id,
+        "spanId": span_id,
+        "name": name,
+        "kind": "SPAN_KIND_INTERNAL",
+        "startTimeUnixNano": str(time_millis * 1_000_000),
+        "endTimeUnixNano": str(
+            time_millis * 1_000_000
+            + max(1, int(float(properties.get("[Agent] Latency Ms", 0)) * 1_000_000))
+        ),
+        "attributes": _otlp_attributes(
+            attrs,
+            config.content_mode,
+            config.redact_pii,
+            config.custom_redaction_patterns,
+        ),
+        "status": status,
+    }
+    if properties.get("[Agent] Parent Span ID"):
+        span["parentSpanId"] = _to_hex_id(
+            properties["[Agent] Parent Span ID"], 8, "parent_span_id"
+        )
+    return {
+        "resourceSpans": [
+            {
+                "resource": {"attributes": []},
+                "scopeSpans": [
+                    {
+                        "scope": {"name": config.named_format or "databricks-mapped-columns"},
+                        "spans": [span],
+                    }
+                ],
+            }
+        ]
+    }
 
 
 def _convert_mapped(row: Mapping[str, Any], config: ConversionConfig) -> List[ConvertedRecord]:
@@ -452,6 +652,11 @@ def _convert_mapped(row: Mapping[str, Any], config: ConversionConfig) -> List[Co
     event = _drop_none(_resolve(config.mapping, row))
     if not isinstance(event, dict):
         raise ConversionError("mapping must resolve to an HTTP V2 event object")
+    properties = event.setdefault("event_properties", {})
+    if isinstance(properties, dict) and config.session_id_column:
+        properties[_SESSION_ID] = row.get(config.session_id_column)
+    if config.user_id_column:
+        event["user_id"] = row.get(config.user_id_column)
     # Session End is SDK lifecycle output, not a source trace/span.  Imports must
     # neither synthesize nor replay it.
     if event.get("event_type") == _SESSION_END:
@@ -459,28 +664,24 @@ def _convert_mapped(row: Mapping[str, Any], config: ConversionConfig) -> List[Co
     if "time" in event:
         event["time"] = _http_v2_time(event["time"])
     if config.named_format:
-        properties = event.setdefault("event_properties", {})
         if isinstance(properties, dict):
             properties.setdefault("[Agent] Source Format", config.named_format)
     if config.content_mode == ContentMode.METADATA_ONLY:
         _metadata_only_event(event)
-    elif config.content_mode == ContentMode.FULL:
+    else:
         properties = event.get("event_properties")
         if isinstance(properties, dict):
-            for key in _SENSITIVE_AGENT_PROPERTIES:
-                if key in properties:
-                    properties[key] = _redact_content(
-                        properties[key],
-                        config.redact_pii,
-                        config.custom_redaction_patterns,
-                    )
+            event["event_properties"] = _redact_content(
+                properties, config.redact_pii, config.custom_redaction_patterns
+            )
     _validate_http_event(event, config.strict_essentials)
-    event.setdefault("insert_id", stable_insert_id(event))
+    stable_key = stable_insert_id(event)
+    payload = _mapped_otlp_span(event, config)
     return [
         ConvertedRecord(
-            protocol=Protocol.HTTP_V2,
-            payload=event,
-            stable_key=str(event["insert_id"]),
+            protocol=Protocol.OTLP_JSON,
+            payload=payload,
+            stable_key=stable_key,
         )
     ]
 
@@ -639,6 +840,14 @@ def _is_sensitive_attribute(name: str) -> bool:
     return False
 
 
+def _metadata_attribute_allowed(name: str) -> bool:
+    return (
+        name in _METADATA_ATTRIBUTE_ALLOWLIST
+        or _is_identity_key(name)
+        or name.startswith("gen_ai.usage.")
+    )
+
+
 def _otlp_attributes(
     attributes: Any,
     content_mode: ContentMode,
@@ -653,7 +862,7 @@ def _otlp_attributes(
         for attribute in attributes:
             if not isinstance(attribute, Mapping) or "key" not in attribute:
                 raise ConversionError("OTLP attribute entries require key/value")
-            if content_mode == ContentMode.METADATA_ONLY and _is_sensitive_attribute(
+            if content_mode == ContentMode.METADATA_ONLY and not _metadata_attribute_allowed(
                 str(attribute["key"])
             ):
                 continue
@@ -683,7 +892,7 @@ def _otlp_attributes(
         if value is not None
         and not (
             content_mode == ContentMode.METADATA_ONLY
-            and _is_sensitive_attribute(str(key))
+            and not _metadata_attribute_allowed(str(key))
         )
     ]
 
@@ -766,6 +975,62 @@ def _convert_span(
         "end_time_unix_nano",
         span.get("endTimeUnixNano", span.get("end_time")),
     )
+    raw_attributes = _parse_json_container(span.get("attributes", {}), "attributes", {})
+    if not isinstance(raw_attributes, Mapping):
+        raise ConversionError("span attributes must be an object")
+    attributes = dict(raw_attributes)
+    span_type = str(
+        span.get("span_type")
+        or span.get("spanType")
+        or span.get("type")
+        or attributes.get("mlflow.spanType")
+        or attributes.get("openinference.span.kind")
+        or ""
+    ).upper()
+    operation = {
+        "LLM": "chat",
+        "CHAT": "chat",
+        "CHAT_MODEL": "chat",
+        "TOOL": "execute_tool",
+        "FUNCTION": "execute_tool",
+    }.get(span_type, "span")
+    attributes.setdefault("gen_ai.operation.name", operation)
+    if span_type:
+        attributes.setdefault("openinference.span.kind", span_type)
+
+    raw_input = span.get(
+        "inputs",
+        span.get("input", attributes.get("mlflow.spanInputs", attributes.get("input.value"))),
+    )
+    raw_output = span.get(
+        "outputs",
+        span.get("output", attributes.get("mlflow.spanOutputs", attributes.get("output.value"))),
+    )
+    def message_value(value: Any, default_role: str) -> Any:
+        if isinstance(value, Mapping):
+            if "messages" in value:
+                return value["messages"]
+            if "content" in value:
+                return [{"role": value.get("role", default_role), "content": value["content"]}]
+        return value
+
+    if raw_input is not None:
+        parsed_input = _parse_json_container(raw_input, "span input", raw_input)
+        if operation == "execute_tool":
+            attributes.setdefault("gen_ai.tool.call.arguments", parsed_input)
+        else:
+            attributes.setdefault(
+                "gen_ai.input.messages", message_value(parsed_input, "user")
+            )
+    if raw_output is not None:
+        parsed_output = _parse_json_container(raw_output, "span output", raw_output)
+        if operation == "execute_tool":
+            attributes.setdefault("gen_ai.tool.call.result", parsed_output)
+        else:
+            attributes.setdefault(
+                "gen_ai.output.messages", message_value(parsed_output, "assistant")
+            )
+
     converted: Dict[str, Any] = {
         "traceId": _to_hex_id(trace_id, 16, "trace_id"),
         "spanId": _to_hex_id(span_id, 8, "span_id"),
@@ -774,7 +1039,7 @@ def _convert_span(
         "startTimeUnixNano": _unix_nanos(start, "span start time"),
         "endTimeUnixNano": _unix_nanos(end, "span end time"),
         "attributes": _otlp_attributes(
-            span.get("attributes", {}),
+            attributes,
             config.content_mode,
             config.redact_pii,
             config.custom_redaction_patterns,
@@ -842,9 +1107,21 @@ def _resource_attributes(
         attributes.update({"mlflow.trace.{}".format(k): v for k, v in metadata.items()})
     if isinstance(tags, Mapping):
         attributes.update({"mlflow.tag.{}".format(k): v for k, v in tags.items()})
-    session_id = _mlflow_session_value(row, metadata, tags)
-    if session_id is not None:
-        attributes["amplitude.session.id"] = session_id
+    session_id = _canonical_session_value(row.get(config.session_id_column)) if config.session_id_column else None
+    session_id = session_id or _mlflow_session_value(row, metadata, tags)
+    _apply_session_attributes(attributes, session_id)
+    user_id = _canonical_session_value(row.get(config.user_id_column)) if config.user_id_column else None
+    if user_id is None:
+        for container in (row, metadata, tags):
+            if isinstance(container, Mapping):
+                for key in ("user_id", "userId", "enduser.id", "mlflow.trace.user"):
+                    user_id = _canonical_session_value(container.get(key))
+                    if user_id is not None:
+                        break
+            if user_id is not None:
+                break
+    if user_id is not None:
+        attributes["enduser.id"] = user_id
     attributes.setdefault("service.name", row.get("service_name", "mlflow-unity-catalog"))
     if config.content_mode == ContentMode.FULL:
         if row.get("request") is not None:
@@ -872,30 +1149,32 @@ def _convert_mlflow(row: Mapping[str, Any], config: ConversionConfig) -> List[Co
     ]
     if len(converted_spans) != len(spans):
         raise ConversionError("every spans entry must be an object")
-    payload = {
-        "resourceSpans": [
-            {
-                "resource": {
-                    "attributes": _resource_attributes(row, config)
-                },
-                "scopeSpans": [
-                    {
-                        "scope": {
-                            "name": config.named_format or "mlflow-unity-catalog"
-                        },
-                        "spans": converted_spans,
-                    }
-                ],
-            }
-        ]
-    }
-    return [
-        ConvertedRecord(
-            protocol=Protocol.OTLP_JSON,
-            payload=payload,
-            stable_key=trace_hex,
+    resource_attributes = _resource_attributes(row, config)
+    records = []
+    for index, converted_span in enumerate(converted_spans):
+        payload = {
+            "resourceSpans": [
+                {
+                    "resource": {"attributes": resource_attributes},
+                    "scopeSpans": [
+                        {
+                            "scope": {
+                                "name": config.named_format or "mlflow-unity-catalog"
+                            },
+                            "spans": [converted_span],
+                        }
+                    ],
+                }
+            ]
+        }
+        records.append(
+            ConvertedRecord(
+                protocol=Protocol.OTLP_JSON,
+                payload=payload,
+                stable_key="{}:{}".format(trace_hex, index),
+            )
         )
-    ]
+    return records
 
 
 def convert_record(
@@ -907,7 +1186,7 @@ def convert_record(
       * input and output are JSON-compatible mappings;
       * conversion is deterministic and has no I/O;
       * ``stable_key`` is replay-stable;
-      * output protocol is either HTTP V2 or OTLP/HTTP JSON;
+      * output protocol is OTLP/HTTP JSON;
       * ``[Agent] Session End`` is never produced.
     """
     row = normalize(record)
@@ -940,6 +1219,8 @@ def canonical_session_id(
     if not isinstance(row, Mapping):
         return None
     if config.source_format == SourceFormat.MAPPED_COLUMNS:
+        if config.session_id_column:
+            return _canonical_session_value(row.get(config.session_id_column))
         if not config.mapping:
             return None
         event = _drop_none(_resolve(config.mapping, row))
@@ -950,6 +1231,8 @@ def canonical_session_id(
             return None
         return _canonical_session_value(properties.get(_SESSION_ID))
     if config.source_format == SourceFormat.MLFLOW_UC:
+        if config.session_id_column:
+            return _canonical_session_value(row.get(config.session_id_column))
         metadata = _parse_json_container(
             row.get("trace_metadata", row.get("traceMetadata")),
             "trace_metadata",
@@ -965,8 +1248,8 @@ def combine_payloads(
 ) -> Mapping[str, Any]:
     """Combine same-protocol envelopes into one executor HTTP request."""
     records = list(records)
-    if protocol == Protocol.HTTP_V2:
-        return {"events": [record.payload for record in records]}
+    if protocol != Protocol.OTLP_JSON:
+        raise ValueError("only OTLP JSON delivery is supported")
     resource_spans: List[Any] = []
     for record in records:
         resource_spans.extend(record.payload.get("resourceSpans", []))
