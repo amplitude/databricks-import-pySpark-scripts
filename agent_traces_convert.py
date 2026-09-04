@@ -126,12 +126,12 @@ _IDENTITY_KEY_SUFFIXES = frozenset(
         "userid",
         "device_id",
         "deviceid",
-        # MLflow's own trace tags, which _resource_attributes re-prefixes as
-        # mlflow.trace.* / mlflow.tag.* before sanitization runs.
-        "session",
-        "user",
     }
 )
+# _resource_attributes re-prefixes metadata and tags, so MLflow's own identity
+# tags arrive as mlflow.trace.* / mlflow.tag.* and are matched on the full name
+# rather than a bare "session"/"user" suffix, which would also exempt content.
+_IDENTITY_KEY_ENDINGS = ("enduser.id", "mlflow.trace.session", "mlflow.trace.user")
 
 _SENSITIVE_AGENT_PROPERTIES = {
     "$llm_message",
@@ -267,7 +267,7 @@ def _redact_text(
 
 def _is_identity_key(name: str) -> bool:
     lowered = name.lower()
-    if lowered in _IDENTITY_KEYS or lowered.endswith("enduser.id"):
+    if lowered in _IDENTITY_KEYS or lowered.endswith(_IDENTITY_KEY_ENDINGS):
         return True
     return lowered.rsplit(".", 1)[-1] in _IDENTITY_KEY_SUFFIXES
 
