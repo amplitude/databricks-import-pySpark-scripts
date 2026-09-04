@@ -424,9 +424,6 @@ def _apply_session_selection(
     every row and a dropped one keeps none.
     """
     session_column = _resolve_session_id_column(data_frame, args)
-    controls_active = args.sample_rate < 1 or args.max_sessions is not None
-    if not controls_active:
-        return data_frame, _unselected_session_stats(session_column)
 
     from pyspark.sql import functions
 

@@ -51,6 +51,7 @@ MAPPING = {
         "[Agent] Agent ID": "$.agent_id",
         "[Agent] Trace ID": "$.trace_id",
         "[Agent] Span ID": "$.span_id",
+        "[Agent] Session ID": "$.session_id",
         "[Agent] Tool Input": "$.tool_input",
         "constant": {"$literal": "$not-a-path"},
     },
@@ -181,8 +182,10 @@ class MlflowSessionExportTests(unittest.TestCase):
             {"stringValue": "session-blank"}, self._session_attribute(row)
         )
 
-    def test_absent_session_leaves_attribute_unset(self):
-        self.assertIsNone(self._session_attribute(dict(self.row)))
+    def test_absent_session_is_skipped(self):
+        with self.assertRaises(ConversionError) as ctx:
+            convert_record(dict(self.row), ConversionConfig(source_format=SourceFormat.MLFLOW_UC))
+        self.assertEqual("missing_session_id", ctx.exception.reason)
 
 
 class SensitiveAttributeTests(unittest.TestCase):
@@ -259,6 +262,7 @@ class MappedColumnsTests(unittest.TestCase):
             "agent_id": "agent-1",
             "trace_id": "a" * 32,
             "span_id": "b" * 16,
+            "session_id": "session-1",
             "tool_input": {"password": "do-not-export-by-default"},
         }
 
@@ -277,6 +281,42 @@ class MappedColumnsTests(unittest.TestCase):
             self.row, mapped_config(content_mode=ContentMode.METADATA_ONLY)
         )[0]
         self.assertNotIn("gen_ai.tool.call.arguments", span_attributes(record))
+
+    def test_metadata_only_keeps_usage_and_finish_fields(self):
+        mapping = dict(MAPPING)
+        mapping["event_properties"] = dict(
+            MAPPING["event_properties"],
+            **{
+                "[Agent] Reasoning Tokens": "$.reasoning_tokens",
+                "[Agent] Cost USD": "$.cost",
+                "[Agent] Finish Reason": "$.finish_reason",
+                "[Agent] Provider Request ID": "$.request_id",
+            },
+        )
+        row = dict(
+            self.row,
+            reasoning_tokens=4,
+            cost=0.02,
+            finish_reason="stop",
+            request_id="req-1",
+        )
+        attrs = span_attributes(
+            convert_record(
+                row,
+                mapped_config(mapping=mapping, content_mode=ContentMode.METADATA_ONLY),
+            )[0]
+        )
+        self.assertEqual("4", str(attrs["gen_ai.usage.reasoning.output_tokens"]))
+        self.assertEqual("0.02", str(attrs["gen_ai.usage.cost"]))
+        self.assertEqual("stop", attrs["gen_ai.response.finish_reason"])
+        self.assertEqual("req-1", attrs["gen_ai.response.id"])
+
+    def test_mapped_row_without_session_is_skipped(self):
+        row = dict(self.row)
+        row.pop("session_id")
+        with self.assertRaises(ConversionError) as ctx:
+            convert_record(row, mapped_config())
+        self.assertEqual("missing_session_id", ctx.exception.reason)
 
     def test_default_full_mode_redacts_builtin_pii_and_base64(self):
         row = dict(
@@ -518,6 +558,15 @@ class MappedColumnsTests(unittest.TestCase):
         self.assertEqual(first["traceId"], second["traceId"])
         self.assertEqual(first["spanId"], second["spanId"])
 
+    def test_non_hex_mapped_ids_hash_instead_of_dropping(self):
+        row = dict(self.row, trace_id="warehouse-trace", span_id="span-uuid")
+        first = otlp_span(convert_record(row, mapped_config())[0])
+        second = otlp_span(convert_record(dict(row), mapped_config())[0])
+        self.assertRegex(first["traceId"], r"^[0-9a-f]{32}$")
+        self.assertRegex(first["spanId"], r"^[0-9a-f]{16}$")
+        self.assertEqual(first["traceId"], second["traceId"])
+        self.assertNotEqual("warehouse-trace", first["traceId"])
+
 
 class MlflowUcTests(unittest.TestCase):
     def setUp(self):
@@ -525,7 +574,7 @@ class MlflowUcTests(unittest.TestCase):
             "trace_id": "01" * 16,
             "request": {"messages": [{"content": "private"}]},
             "response": {"content": "also private"},
-            "trace_metadata": json.dumps({"experiment": "exp-1"}),
+            "trace_metadata": json.dumps({"experiment": "exp-1", "session_id": "session-1"}),
             "tags": {"team": "ai"},
             "spans": [
                 {
@@ -1240,10 +1289,17 @@ class DryRunTests(unittest.TestCase):
 
         original = agent_traces_job.urllib.request.urlopen
         agent_traces_job.urllib.request.urlopen = fail_on_post
+        original_selection = agent_traces_job._apply_session_selection
+
+        def passthrough(data_frame, args, conversion_values):
+            return data_frame, agent_traces_job._unselected_session_stats(None)
+
+        agent_traces_job._apply_session_selection = passthrough
         try:
             result = self._dry_run([case.row, dict(case.row, identity={})])
         finally:
             agent_traces_job.urllib.request.urlopen = original
+            agent_traces_job._apply_session_selection = original_selection
 
         self.assertEqual([], posted)
         self.assertEqual("dry_run", result["status"])

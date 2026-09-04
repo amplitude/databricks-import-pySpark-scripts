@@ -518,32 +518,41 @@ def _drop_none(value: Any) -> Any:
     return value
 
 
+_MAPPED_METADATA_PROPERTIES = frozenset(
+    {
+        _AGENT_ID,
+        _TRACE_ID,
+        _SPAN_ID,
+        _SESSION_ID,
+        "[Agent] Parent Span ID",
+        "[Agent] Model Name",
+        "[Agent] Model Provider",
+        "[Agent] Input Tokens",
+        "[Agent] Output Tokens",
+        "[Agent] Reasoning Tokens",
+        "[Agent] Cache Read Tokens",
+        "[Agent] Cache Creation Tokens",
+        "[Agent] Cost USD",
+        "[Agent] Latency Ms",
+        "[Agent] Is Error",
+        "[Agent] Tool Name",
+        "[Agent] Invocation ID",
+        "[Agent] Span Name",
+        "[Agent] Environment",
+        "[Agent] Source Format",
+        "[Agent] Provider Request ID",
+        "[Agent] Finish Reason",
+    }
+)
+
+
 def _metadata_only_event(event: Dict[str, Any]) -> None:
     properties = event.get("event_properties")
     if isinstance(properties, Mapping):
         event["event_properties"] = {
             key: value
             for key, value in properties.items()
-            if _is_identity_key(str(key))
-            or key
-            in {
-                _AGENT_ID,
-                _TRACE_ID,
-                _SPAN_ID,
-                _SESSION_ID,
-                "[Agent] Parent Span ID",
-                "[Agent] Model Name",
-                "[Agent] Model Provider",
-                "[Agent] Input Tokens",
-                "[Agent] Output Tokens",
-                "[Agent] Latency Ms",
-                "[Agent] Is Error",
-                "[Agent] Tool Name",
-                "[Agent] Invocation ID",
-                "[Agent] Span Name",
-                "[Agent] Environment",
-                "[Agent] Source Format",
-            }
+            if _is_identity_key(str(key)) or key in _MAPPED_METADATA_PROPERTIES
         }
 
 
@@ -572,8 +581,9 @@ def _validate_http_event(event: Mapping[str, Any], strict: bool) -> None:
 
 
 def _derived_hex(value: Any, length: int, material: Any) -> str:
-    if value is not None and str(value).strip():
-        return _to_hex_id(value, length // 2, "identifier")
+    text = str(value or "").strip().replace("-", "").lower()
+    if len(text) == length and re.match(r"^[0-9a-f]+$", text):
+        return text
     return hashlib.sha256(canonical_json(material).encode("utf-8")).hexdigest()[:length]
 
 
@@ -669,8 +679,10 @@ def _mapped_otlp_span(event: Mapping[str, Any], config: ConversionConfig) -> Map
         "status": status,
     }
     if properties.get("[Agent] Parent Span ID"):
-        span["parentSpanId"] = _to_hex_id(
-            properties["[Agent] Parent Span ID"], 8, "parent_span_id"
+        span["parentSpanId"] = _derived_hex(
+            properties["[Agent] Parent Span ID"],
+            16,
+            properties["[Agent] Parent Span ID"],
         )
     return {
         "resourceSpans": [
@@ -701,6 +713,13 @@ def _convert_mapped(row: Mapping[str, Any], config: ConversionConfig) -> List[Co
     user_id = _column_override(row, config.user_id_column)
     if user_id is not None:
         event["user_id"] = user_id
+    if isinstance(properties, dict) and _canonical_session_value(
+        properties.get(_SESSION_ID)
+    ) is None:
+        raise ConversionError(
+            "mapped event requires {!r}".format(_SESSION_ID),
+            reason="missing_session_id",
+        )
     # Session End is SDK lifecycle output, not a source trace/span.  Imports must
     # neither synthesize nor replay it.
     if event.get("event_type") == _SESSION_END:
@@ -748,7 +767,7 @@ def _to_hex_id(value: Any, byte_length: int, field_name: str) -> str:
     binary = _binary_hex(value)
     if binary is not None:
         value = binary
-    text = str(value or "").replace("-", "").lower()
+    text = str(value or "").strip().replace("-", "").lower()
     required_length = byte_length * 2
     if len(text) != required_length or not re.match(r"^[0-9a-f]+$", text):
         raise ConversionError(
@@ -1204,6 +1223,13 @@ def _convert_mlflow(row: Mapping[str, Any], config: ConversionConfig) -> List[Co
     if len(converted_spans) != len(spans):
         raise ConversionError("every spans entry must be an object")
     resource_attributes = _resource_attributes(row, config)
+    if not any(
+        item.get("key") in _RECEIVER_SESSION_KEYS for item in resource_attributes
+    ):
+        raise ConversionError(
+            "mlflow-uc record requires a session/conversation identifier",
+            reason="missing_session_id",
+        )
     records = []
     for index, converted_span in enumerate(converted_spans):
         payload = {
