@@ -136,6 +136,29 @@ class MappedColumnsTests(unittest.TestCase):
         self.assertEqual("[ip_address]", tool_input["ipv6"])
         self.assertEqual("[base64 image redacted]", tool_input["image"])
 
+    def test_full_mode_preserves_email_shaped_identity_keys(self):
+        mapping = dict(MAPPING)
+        mapping["event_properties"] = dict(
+            MAPPING["event_properties"],
+            **{"[Agent] Session ID": "$.session_id"},
+        )
+        row = dict(
+            self.row,
+            identity={"user": "person@example.com"},
+            session_id="thread@example.com",
+            tool_input={"email": "secret@example.com"},
+        )
+        record = convert_record(row, mapped_config(mapping=mapping))[0]
+        self.assertEqual("person@example.com", record.payload["user_id"])
+        self.assertEqual(
+            "thread@example.com",
+            record.payload["event_properties"]["[Agent] Session ID"],
+        )
+        self.assertEqual(
+            "[email]",
+            record.payload["event_properties"]["[Agent] Tool Input"]["email"],
+        )
+
     def test_redaction_can_be_disabled_and_custom_patterns_apply(self):
         row = dict(self.row, tool_input="user@example.com account ACME-123")
         record = convert_record(
@@ -273,6 +296,32 @@ class MlflowUcTests(unittest.TestCase):
         self.assertEqual(
             "email [email] from [ip_address]",
             values[0]["value"]["stringValue"],
+        )
+
+    def test_full_mode_preserves_email_shaped_mlflow_identity(self):
+        row = dict(
+            self.row,
+            request={"email": "secret@example.com"},
+            trace_metadata=json.dumps(
+                {"session_id": "thread@example.com", "enduser.id": "person@example.com"}
+            ),
+        )
+        resource = convert_record(
+            row, ConversionConfig(source_format=SourceFormat.MLFLOW_UC)
+        )[0].payload["resourceSpans"][0]["resource"]["attributes"]
+        attrs = {
+            item["key"]: item["value"].get("stringValue") for item in resource
+        }
+        self.assertEqual("person@example.com", attrs["mlflow.trace.enduser.id"])
+        self.assertEqual("thread@example.com", attrs["mlflow.trace.session_id"])
+        request = next(
+            item["value"]
+            for item in resource
+            if item["key"] == "mlflow.trace.request"
+        )
+        self.assertEqual(
+            "[email]",
+            request["kvlistValue"]["values"][0]["value"]["stringValue"],
         )
 
     def test_rejects_invalid_trace_id(self):

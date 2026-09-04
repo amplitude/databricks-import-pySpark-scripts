@@ -79,6 +79,38 @@ _TRACE_ID = "[Agent] Trace ID"
 _SPAN_ID = "[Agent] Span ID"
 _SESSION_ID = "[Agent] Session ID"
 _SESSION_END = "[Agent] Session End"
+_IDENTITY_KEYS = frozenset(
+    {
+        "user_id",
+        "userid",
+        "device_id",
+        "deviceid",
+        "enduser.id",
+        "amplitude.session.id",
+        "gen_ai.conversation.id",
+        "session_id",
+        "conversation_id",
+        "[agent] session id",
+        "[agent] agent id",
+        "[agent] trace id",
+        "[agent] span id",
+        "trace_id",
+        "span_id",
+        "parent_span_id",
+        "parentspanid",
+        "insert_id",
+    }
+)
+_IDENTITY_KEY_SUFFIXES = frozenset(
+    {
+        "session_id",
+        "conversation_id",
+        "user_id",
+        "userid",
+        "device_id",
+        "deviceid",
+    }
+)
 
 _SENSITIVE_AGENT_PROPERTIES = {
     "$llm_message",
@@ -205,6 +237,13 @@ def _redact_text(
     return text
 
 
+def _is_identity_key(name: str) -> bool:
+    lowered = name.lower()
+    if lowered in _IDENTITY_KEYS or lowered.endswith("enduser.id"):
+        return True
+    return lowered.rsplit(".", 1)[-1] in _IDENTITY_KEY_SUFFIXES
+
+
 def _redact_content(
     value: Any, redact_pii: bool, custom_patterns: Sequence[str]
 ) -> Any:
@@ -212,7 +251,9 @@ def _redact_content(
         return _redact_text(value, redact_pii, custom_patterns)
     if isinstance(value, Mapping):
         return {
-            key: _redact_content(item, redact_pii, custom_patterns)
+            key: item
+            if _is_identity_key(str(key))
+            else _redact_content(item, redact_pii, custom_patterns)
             for key, item in value.items()
         }
     if isinstance(value, list):
@@ -564,7 +605,11 @@ def _otlp_attributes(
             ):
                 continue
             normalized = normalize(attribute)
-            if content_mode == ContentMode.FULL and "value" in normalized:
+            if (
+                content_mode == ContentMode.FULL
+                and "value" in normalized
+                and not _is_identity_key(str(attribute["key"]))
+            ):
                 normalized["value"] = _redact_content(
                     normalized["value"], redact_pii, custom_patterns
                 )
@@ -576,9 +621,9 @@ def _otlp_attributes(
         {
             "key": str(key),
             "value": _otlp_any_value(
-                _redact_content(value, redact_pii, custom_patterns)
-                if content_mode == ContentMode.FULL
-                else value
+                value
+                if content_mode != ContentMode.FULL or _is_identity_key(str(key))
+                else _redact_content(value, redact_pii, custom_patterns)
             ),
         }
         for key, value in attributes.items()
