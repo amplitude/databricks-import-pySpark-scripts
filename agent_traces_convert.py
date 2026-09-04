@@ -670,6 +670,31 @@ def _status(status: Any) -> Mapping[str, Any]:
     return result
 
 
+def _span_kind(kind: Any) -> str:
+    if kind is None:
+        return "SPAN_KIND_INTERNAL"
+    if isinstance(kind, int):
+        kind = {
+            0: "SPAN_KIND_UNSPECIFIED",
+            1: "SPAN_KIND_INTERNAL",
+            2: "SPAN_KIND_SERVER",
+            3: "SPAN_KIND_CLIENT",
+            4: "SPAN_KIND_PRODUCER",
+            5: "SPAN_KIND_CONSUMER",
+        }.get(kind, "SPAN_KIND_INTERNAL")
+    kind = str(kind).upper()
+    if not kind.startswith("SPAN_KIND_"):
+        kind = {
+            "UNSPECIFIED": "SPAN_KIND_UNSPECIFIED",
+            "INTERNAL": "SPAN_KIND_INTERNAL",
+            "SERVER": "SPAN_KIND_SERVER",
+            "CLIENT": "SPAN_KIND_CLIENT",
+            "PRODUCER": "SPAN_KIND_PRODUCER",
+            "CONSUMER": "SPAN_KIND_CONSUMER",
+        }.get(kind, "SPAN_KIND_INTERNAL")
+    return kind
+
+
 def _convert_span(
     raw_span: Mapping[str, Any],
     fallback_trace_id: Any,
@@ -691,7 +716,7 @@ def _convert_span(
         "traceId": _to_hex_id(trace_id, 16, "trace_id"),
         "spanId": _to_hex_id(span_id, 8, "span_id"),
         "name": str(span.get("name") or span.get("span_name") or "mlflow.span"),
-        "kind": str(span.get("kind", "SPAN_KIND_INTERNAL")).upper(),
+        "kind": _span_kind(span.get("kind")),
         "startTimeUnixNano": _unix_nanos(start, "span start time"),
         "endTimeUnixNano": _unix_nanos(end, "span end time"),
         "attributes": _otlp_attributes(
