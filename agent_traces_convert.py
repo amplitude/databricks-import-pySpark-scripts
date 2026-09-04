@@ -155,6 +155,7 @@ _IDENTITY_KEYS = frozenset(
         "[agent] agent id",
         "[agent] trace id",
         "[agent] span id",
+        "[agent] parent span id",
         "trace_id",
         "span_id",
         "parent_span_id",
@@ -1255,10 +1256,20 @@ def _column_override(row: Mapping[str, Any], column: Optional[str]) -> Optional[
 
 def _mapped_duration_nanos(latency_ms: Any) -> int:
     try:
-        return max(1, int(float(latency_ms) * 1_000_000))
+        millis = float(latency_ms)
     except (TypeError, ValueError):
         raise ConversionError(
             "[Agent] Latency Ms must be numeric", reason="invalid_record"
+        )
+    if not math.isfinite(millis):
+        raise ConversionError(
+            "[Agent] Latency Ms must be finite", reason="invalid_record"
+        )
+    try:
+        return max(1, int(millis * 1_000_000))
+    except OverflowError:
+        raise ConversionError(
+            "[Agent] Latency Ms is out of range", reason="invalid_record"
         )
 
 
@@ -1292,7 +1303,7 @@ def canonical_session_id(
         if override is not None:
             return override
         metadata = _parse_json_container(
-            row.get("trace_metadata", row.get("traceMetadata")),
+            _first_present(row, "trace_metadata", "traceMetadata"),
             "trace_metadata",
             {},
         )

@@ -159,6 +159,15 @@ class MlflowSessionExportTests(unittest.TestCase):
             {"stringValue": "session-tag"}, self._session_attribute(row)
         )
 
+    def test_null_trace_metadata_falls_back_to_camelcase_alias(self):
+        row = dict(
+            self.row,
+            trace_metadata=None,
+            traceMetadata=json.dumps({"session_id": "session-camel"}),
+        )
+        config = ConversionConfig(source_format=SourceFormat.MLFLOW_UC)
+        self.assertEqual("session-camel", canonical_session_id(row, config))
+
     def test_absent_session_leaves_attribute_unset(self):
         self.assertIsNone(self._session_attribute(dict(self.row)))
 
@@ -342,6 +351,18 @@ class MappedColumnsTests(unittest.TestCase):
         with self.assertRaises(ConversionError) as ctx:
             convert_record(row, mapped_config(mapping=mapping))
         self.assertEqual("invalid_record", ctx.exception.reason)
+
+    def test_infinite_latency_is_an_invalid_record(self):
+        mapping = dict(MAPPING)
+        mapping["event_properties"] = dict(
+            MAPPING["event_properties"],
+            **{"[Agent] Latency Ms": "$.latency_ms"},
+        )
+        for value in ("inf", 1e308):
+            row = dict(self.row, latency_ms=value)
+            with self.assertRaises(ConversionError) as ctx:
+                convert_record(row, mapped_config(mapping=mapping))
+            self.assertEqual("invalid_record", ctx.exception.reason)
 
     def test_full_mode_preserves_email_shaped_identity_keys(self):
         mapping = dict(MAPPING)
