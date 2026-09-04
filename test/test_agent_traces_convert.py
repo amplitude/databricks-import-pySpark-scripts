@@ -14,6 +14,7 @@ from agent_traces_convert import (
     ConversionError,
     Protocol,
     SourceFormat,
+    _is_sensitive_attribute,
     _span_kind,
     _to_hex_id,
     canonical_session_id,
@@ -85,6 +86,20 @@ class SparkValueTests(unittest.TestCase):
         self.assertEqual("ab" * 16, normalize(payload))
         self.assertEqual("ab" * 16, _to_hex_id(payload, 16, "trace_id"))
         self.assertEqual("ab" * 16, _to_hex_id(bytes(payload), 16, "trace_id"))
+
+
+class SensitiveAttributeTests(unittest.TestCase):
+    def test_mlflow_camelcase_content_keys_are_sensitive(self):
+        self.assertTrue(_is_sensitive_attribute("mlflow.spanInputs"))
+        self.assertTrue(_is_sensitive_attribute("mlflow.spanOutputs"))
+        self.assertTrue(_is_sensitive_attribute("gen_ai.prompt.messages"))
+        self.assertTrue(_is_sensitive_attribute("llm.input.value"))
+
+    def test_metadata_keys_stay_non_sensitive(self):
+        self.assertFalse(_is_sensitive_attribute("mlflow.spanType"))
+        self.assertFalse(_is_sensitive_attribute("service.name"))
+        self.assertFalse(_is_sensitive_attribute("gen_ai.usage.total_tokens"))
+        self.assertFalse(_is_sensitive_attribute("gen_ai.usage.prompt_tokens"))
 
 
 class SpanKindTests(unittest.TestCase):

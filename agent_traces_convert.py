@@ -79,6 +79,17 @@ _TRACE_ID = "[Agent] Trace ID"
 _SPAN_ID = "[Agent] Span ID"
 _SESSION_ID = "[Agent] Session ID"
 _SESSION_END = "[Agent] Session End"
+# Must stay in sync with Langley's _mlflow_session_id so sampling groups rows by
+# the same key the converter ultimately assigns as the session.
+_MLFLOW_SESSION_KEYS = (
+    "session_id",
+    "sessionId",
+    "conversation_id",
+    "conversationId",
+    "amplitude.session.id",
+    "gen_ai.conversation.id",
+    "mlflow.trace.session",
+)
 _IDENTITY_KEYS = frozenset(
     {
         "user_id",
@@ -141,6 +152,7 @@ _SENSITIVE_KEY_PARTS = (
     "tool.arguments",
     "tool.result",
 )
+_CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 _REDACTED_BASE64 = "[base64 image redacted]"
 _BUILTIN_REDACTIONS = (
     (r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b", "[email]"),
@@ -576,7 +588,10 @@ def _otlp_any_value(value: Any) -> Mapping[str, Any]:
 
 
 def _is_sensitive_attribute(name: str) -> bool:
-    lowered = name.lower()
+    # MLflow writes camelCase content keys (mlflow.spanInputs / mlflow.spanOutputs),
+    # so break case boundaries before matching whole segments. Segments are matched
+    # exactly so metadata like gen_ai.usage.prompt_tokens survives metadata-only mode.
+    lowered = _CAMEL_BOUNDARY.sub(".", name).lower()
     segments = re.split(r"[.\[\]]+", lowered)
     for part in _SENSITIVE_KEY_PARTS:
         if part in ("request", "response"):
@@ -886,7 +901,7 @@ def canonical_session_id(
         for container in (row, metadata, tags):
             if not isinstance(container, Mapping):
                 continue
-            for key in ("conversation_id", "session_id"):
+            for key in _MLFLOW_SESSION_KEYS:
                 session_id = _canonical_session_value(container.get(key))
                 if session_id is not None:
                     return session_id
