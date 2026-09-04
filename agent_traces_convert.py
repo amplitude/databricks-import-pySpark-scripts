@@ -380,7 +380,7 @@ def _is_secret_key(name: str) -> bool:
             return True
         # Prefix match only ``secret_`` so ``secret_key`` redacts without
         # treating ``token_count`` as a credential.
-        if candidate.startswith("secret_"):
+        if candidate.startswith("secret_") or "_secret_" in candidate:
             return True
         if any(candidate.endswith("_{}".format(part)) for part in _SECRET_KEY_PARTS):
             return True

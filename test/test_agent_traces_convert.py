@@ -330,6 +330,7 @@ class MappedColumnsTests(unittest.TestCase):
                 "secret_key": "sk-live",
                 "secretKey": "sk-camel",
                 "secret_access_key": "akia",
+                "aws_secret_access_key": "akia",
             },
         )
         tool_input = span_attributes(convert_record(row, mapped_config())[0])[
@@ -338,6 +339,7 @@ class MappedColumnsTests(unittest.TestCase):
         self.assertEqual("[secret]", tool_input["secret_key"])
         self.assertEqual("[secret]", tool_input["secretKey"])
         self.assertEqual("[secret]", tool_input["secret_access_key"])
+        self.assertEqual("[secret]", tool_input["aws_secret_access_key"])
 
     def test_full_mode_keeps_token_usage_metrics(self):
         row = dict(
