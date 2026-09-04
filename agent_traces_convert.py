@@ -200,7 +200,12 @@ def _json_default(value: Any) -> Any:
 
 
 def normalize(value: Any) -> Any:
-    """Convert Spark Row/date/bytes values into JSON-compatible values."""
+    """Convert Spark Row/date/bytes values into JSON-compatible values.
+
+    Naive datetimes are treated as UTC. The job pins
+    ``spark.sql.session.timeZone`` to UTC so ``Row.asDict()`` renders them that
+    way regardless of cluster locale.
+    """
     if hasattr(value, "asDict"):
         value = value.asDict(recursive=True)
     if isinstance(value, Mapping):
@@ -785,6 +790,24 @@ def _convert_span(
     return converted
 
 
+def _mlflow_session_value(
+    row: Mapping[str, Any], metadata: Any, tags: Any
+) -> Optional[str]:
+    """Resolve the MLflow conversation key from the row, metadata, then tags.
+
+    Shared by ``canonical_session_id`` and ``_resource_attributes`` so sampling
+    groups by exactly the session Amplitude receives.
+    """
+    for container in (row, metadata, tags):
+        if not isinstance(container, Mapping):
+            continue
+        for key in _MLFLOW_SESSION_KEYS:
+            session_id = _canonical_session_value(container.get(key))
+            if session_id is not None:
+                return session_id
+    return None
+
+
 def _resource_attributes(
     row: Mapping[str, Any], config: ConversionConfig
 ) -> List[Mapping[str, Any]]:
@@ -797,6 +820,9 @@ def _resource_attributes(
         attributes.update({"mlflow.trace.{}".format(k): v for k, v in metadata.items()})
     if isinstance(tags, Mapping):
         attributes.update({"mlflow.tag.{}".format(k): v for k, v in tags.items()})
+    session_id = _mlflow_session_value(row, metadata, tags)
+    if session_id is not None:
+        attributes["amplitude.session.id"] = session_id
     attributes.setdefault("service.name", row.get("service_name", "mlflow-unity-catalog"))
     if config.content_mode == ContentMode.FULL:
         if row.get("request") is not None:
@@ -908,14 +934,7 @@ def canonical_session_id(
             {},
         )
         tags = _parse_json_container(row.get("tags"), "tags", {})
-        for container in (row, metadata, tags):
-            if not isinstance(container, Mapping):
-                continue
-            for key in _MLFLOW_SESSION_KEYS:
-                session_id = _canonical_session_value(container.get(key))
-                if session_id is not None:
-                    return session_id
-        return None
+        return _mlflow_session_value(row, metadata, tags)
     return None
 
 

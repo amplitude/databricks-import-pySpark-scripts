@@ -88,6 +88,51 @@ class SparkValueTests(unittest.TestCase):
         self.assertEqual("ab" * 16, _to_hex_id(bytes(payload), 16, "trace_id"))
 
 
+class MlflowSessionExportTests(unittest.TestCase):
+    def setUp(self):
+        self.row = {
+            "trace_id": "0a" * 16,
+            "trace_metadata": json.dumps({"experiment": "exp-1"}),
+            "tags": {"team": "ai"},
+            "spans": [
+                {
+                    "span_id": "0b" * 8,
+                    "name": "predict",
+                    "start_time": dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc),
+                    "end_time": dt.datetime(2026, 1, 1, 0, 0, 1, tzinfo=dt.timezone.utc),
+                    "attributes": {},
+                }
+            ],
+        }
+
+    def _session_attribute(self, row):
+        config = ConversionConfig(source_format=SourceFormat.MLFLOW_UC)
+        resource = convert_record(row, config)[0].payload["resourceSpans"][0]
+        attributes = {
+            item["key"]: item["value"] for item in resource["resource"]["attributes"]
+        }
+        return attributes.get("amplitude.session.id")
+
+    def test_row_level_session_is_exported_and_matches_sampling_key(self):
+        row = dict(self.row, session_id="session-row")
+        config = ConversionConfig(source_format=SourceFormat.MLFLOW_UC)
+        self.assertEqual("session-row", canonical_session_id(row, config))
+        self.assertEqual(
+            {"stringValue": "session-row"}, self._session_attribute(row)
+        )
+
+    def test_official_mlflow_tag_is_exported(self):
+        row = dict(self.row, tags={"mlflow.trace.session": "session-tag"})
+        config = ConversionConfig(source_format=SourceFormat.MLFLOW_UC)
+        self.assertEqual("session-tag", canonical_session_id(row, config))
+        self.assertEqual(
+            {"stringValue": "session-tag"}, self._session_attribute(row)
+        )
+
+    def test_absent_session_leaves_attribute_unset(self):
+        self.assertIsNone(self._session_attribute(dict(self.row)))
+
+
 class SensitiveAttributeTests(unittest.TestCase):
     def test_mlflow_camelcase_content_keys_are_sensitive(self):
         self.assertTrue(_is_sensitive_attribute("mlflow.spanInputs"))

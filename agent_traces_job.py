@@ -221,7 +221,7 @@ def _load_mapping(args: argparse.Namespace, dbutils: Any = None) -> Optional[Map
         if path.startswith(("dbfs:", "s3:", "s3a:", "abfss:")):
             if dbutils is None:
                 raise ValueError("dbutils is required to read mapping path {}".format(path))
-            raw = dbutils.fs.head(path, MAX_MAPPING_BYTES)
+            raw = dbutils.fs.head(path, MAX_MAPPING_BYTES + 1)
         else:
             with open(path, "r", encoding="utf-8") as handle:
                 raw = handle.read(MAX_MAPPING_BYTES + 1)
@@ -801,6 +801,13 @@ def run(
         from pyspark.sql import SparkSession
 
         spark = SparkSession.builder.getOrCreate()
+    # Row.asDict() renders TimestampType as naive datetimes in the session
+    # timezone, and the converter stamps naive values as UTC. Pinning the
+    # session to UTC keeps a non-UTC cluster from shifting every timestamp.
+    try:
+        spark.conf.set("spark.sql.session.timeZone", "UTC")
+    except Exception:  # pragma: no cover - older/limited Spark configs
+        pass
     if dbutils is None:
         dbutils = globals().get("dbutils")
     if dbutils is None and (
