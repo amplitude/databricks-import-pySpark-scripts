@@ -469,30 +469,31 @@ class MappedColumnsTests(unittest.TestCase):
         mapping = dict(MAPPING)
         mapping["event_properties"] = dict(
             MAPPING["event_properties"],
-            **{"[Agent] Session ID": "$.session_id"},
+            **{
+                "[Agent] Session ID": "$.session_id",
+                "[Agent] Invocation ID": "$.invocation_id",
+                "[Agent] Provider Request ID": "$.request_id",
+            },
         )
         row = dict(
             self.row,
             identity={"user": "person@example.com"},
             session_id="thread@example.com",
+            agent_id="agent@example.com",
+            invocation_id="call@example.com",
+            request_id="req@example.com",
             tool_input={"email": "secret@example.com"},
         )
         record = convert_record(row, mapped_config(mapping=mapping))[0]
-        self.assertEqual(
-            "person@example.com", span_attributes(record)["enduser.id"]
-        )
-        self.assertEqual(
-            "thread@example.com", span_attributes(record)["amplitude.session_id"]
-        )
-        self.assertEqual(
-            "thread@example.com", span_attributes(record)["gen_ai.conversation.id"]
-        )
-        self.assertEqual(
-            "thread@example.com", span_attributes(record)["session.id"]
-        )
-        self.assertEqual(
-            "[email]", span_attributes(record)["gen_ai.tool.call.arguments"]["email"]
-        )
+        attrs = span_attributes(record)
+        self.assertEqual("person@example.com", attrs["enduser.id"])
+        self.assertEqual("thread@example.com", attrs["amplitude.session_id"])
+        self.assertEqual("thread@example.com", attrs["gen_ai.conversation.id"])
+        self.assertEqual("thread@example.com", attrs["session.id"])
+        self.assertEqual("agent@example.com", attrs["gen_ai.agent.id"])
+        self.assertEqual("call@example.com", attrs["gen_ai.tool.call.id"])
+        self.assertEqual("req@example.com", attrs["gen_ai.response.id"])
+        self.assertEqual("[email]", attrs["gen_ai.tool.call.arguments"]["email"])
 
     def test_redaction_can_be_disabled_and_custom_patterns_apply(self):
         row = dict(self.row, tool_input="user@example.com account ACME-123")
