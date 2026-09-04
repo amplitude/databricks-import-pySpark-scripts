@@ -1256,7 +1256,7 @@ def _column_override(row: Mapping[str, Any], column: Optional[str]) -> Optional[
 def _mapped_duration_nanos(latency_ms: Any) -> int:
     try:
         return max(1, int(float(latency_ms) * 1_000_000))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         raise ConversionError(
             "[Agent] Latency Ms must be numeric", reason="invalid_record"
         )
@@ -1292,7 +1292,7 @@ def canonical_session_id(
         if override is not None:
             return override
         metadata = _parse_json_container(
-            row.get("trace_metadata", row.get("traceMetadata")),
+            _first_present(row, "trace_metadata", "traceMetadata"),
             "trace_metadata",
             {},
         )
