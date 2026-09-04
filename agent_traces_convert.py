@@ -370,8 +370,13 @@ def _is_secret_key(name: str) -> bool:
         return True
     if any(lowered.endswith("_{}".format(part)) for part in _SECRET_KEY_PARTS):
         return True
-    parts = set(re.split(r"[^a-z0-9]+", lowered))
-    return bool(parts & _SECRET_KEY_PARTS)
+    segments = re.split(r"[.\[\]]+", lowered)
+    for part in _SECRET_KEY_PARTS:
+        if any(segment == part for segment in segments):
+            return True
+        if any(segment.endswith("_{}".format(part)) for segment in segments):
+            return True
+    return False
 
 
 def _redact_content(
