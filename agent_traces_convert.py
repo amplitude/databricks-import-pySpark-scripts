@@ -90,8 +90,11 @@ def _first_present(mapping: Mapping[str, Any], *keys: str, default: Any = None) 
         if key not in mapping:
             continue
         value = mapping[key]
-        if value is not None:
-            return value
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        return value
     return default
 
 
@@ -128,10 +131,11 @@ _RECEIVER_SESSION_KEYS = (
 
 
 def _apply_session_attributes(attributes: Dict[str, Any], session_id: Any) -> None:
-    if session_id is None:
+    canonical = _canonical_session_value(session_id)
+    if canonical is None:
         return
     for key in _RECEIVER_SESSION_KEYS:
-        attributes[key] = session_id
+        attributes[key] = canonical
 
 
 _IDENTITY_KEYS = frozenset(
@@ -373,6 +377,10 @@ def _is_secret_key(name: str) -> bool:
     last_segment = re.split(r"[.\[\]]+", normalized_key)[-1]
     for candidate in (normalized_key, last_segment):
         if candidate in _SECRET_KEY_PARTS:
+            return True
+        # Prefix match only ``secret_`` so ``secret_key`` redacts without
+        # treating ``token_count`` as a credential.
+        if candidate.startswith("secret_"):
             return True
         if any(candidate.endswith("_{}".format(part)) for part in _SECRET_KEY_PARTS):
             return True
@@ -641,15 +649,17 @@ def _mapped_otlp_span(event: Mapping[str, Any], config: ConversionConfig) -> Map
     }
     if properties.get("[Agent] Error Message"):
         status["message"] = properties["[Agent] Error Message"]
+    # HTTP V2 ``time`` is the operation end. Latency is measured backward.
+    duration_nanos = _mapped_duration_nanos(properties.get("[Agent] Latency Ms", 0))
+    end_nanos = time_millis * 1_000_000
+    start_nanos = max(0, end_nanos - duration_nanos)
     span: Dict[str, Any] = {
         "traceId": trace_id,
         "spanId": span_id,
         "name": name,
         "kind": "SPAN_KIND_INTERNAL",
-        "startTimeUnixNano": str(time_millis * 1_000_000),
-        "endTimeUnixNano": str(
-            time_millis * 1_000_000 + _mapped_duration_nanos(properties.get("[Agent] Latency Ms", 0))
-        ),
+        "startTimeUnixNano": str(start_nanos),
+        "endTimeUnixNano": str(end_nanos),
         "attributes": _otlp_attributes(
             attrs,
             config.content_mode,
@@ -725,6 +735,8 @@ def _parse_json_container(value: Any, field_name: str, default: Any) -> Any:
         return default
     value = normalize(value)
     if isinstance(value, str):
+        if not value.strip():
+            return default
         try:
             return json.loads(value)
         except ValueError as exc:

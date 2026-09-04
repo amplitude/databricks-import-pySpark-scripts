@@ -168,6 +168,19 @@ class MlflowSessionExportTests(unittest.TestCase):
         config = ConversionConfig(source_format=SourceFormat.MLFLOW_UC)
         self.assertEqual("session-camel", canonical_session_id(row, config))
 
+    def test_blank_json_containers_fall_back_to_aliases(self):
+        row = dict(
+            self.row,
+            tags="",
+            trace_metadata="   ",
+            traceMetadata=json.dumps({"session_id": "session-blank"}),
+        )
+        config = ConversionConfig(source_format=SourceFormat.MLFLOW_UC)
+        self.assertEqual("session-blank", canonical_session_id(row, config))
+        self.assertEqual(
+            {"stringValue": "session-blank"}, self._session_attribute(row)
+        )
+
     def test_absent_session_leaves_attribute_unset(self):
         self.assertIsNone(self._session_attribute(dict(self.row)))
 
@@ -310,6 +323,22 @@ class MappedColumnsTests(unittest.TestCase):
         ]
         self.assertEqual("[secret]", tool_input["openai_api_key"])
 
+    def test_full_mode_redacts_secret_key_prefix_names(self):
+        row = dict(
+            self.row,
+            tool_input={
+                "secret_key": "sk-live",
+                "secretKey": "sk-camel",
+                "secret_access_key": "akia",
+            },
+        )
+        tool_input = span_attributes(convert_record(row, mapped_config())[0])[
+            "gen_ai.tool.call.arguments"
+        ]
+        self.assertEqual("[secret]", tool_input["secret_key"])
+        self.assertEqual("[secret]", tool_input["secretKey"])
+        self.assertEqual("[secret]", tool_input["secret_access_key"])
+
     def test_full_mode_keeps_token_usage_metrics(self):
         row = dict(
             self.row,
@@ -340,6 +369,19 @@ class MappedColumnsTests(unittest.TestCase):
         record = convert_record(row, config)[0]
         self.assertEqual("mapped-s", span_attributes(record)["gen_ai.conversation.id"])
         self.assertEqual("user-1", span_attributes(record)["enduser.id"])
+
+    def test_mapped_session_ids_are_canonicalized(self):
+        mapping = dict(MAPPING)
+        mapping["event_properties"] = dict(
+            MAPPING["event_properties"],
+            **{"[Agent] Session ID": "$.session_id"},
+        )
+        row = dict(self.row, session_id="  123  ")
+        config = mapped_config(mapping=mapping)
+        self.assertEqual("123", canonical_session_id(row, config))
+        attrs = span_attributes(convert_record(row, config)[0])
+        self.assertEqual("123", attrs["gen_ai.conversation.id"])
+        self.assertEqual("123", attrs["amplitude.session_id"])
 
     def test_non_numeric_latency_is_an_invalid_record(self):
         mapping = dict(MAPPING)
@@ -453,12 +495,17 @@ class MappedColumnsTests(unittest.TestCase):
 
     def test_datetime_timestamp_maps_to_otlp_nanos(self):
         when = dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=dt.timezone.utc)
-        row = dict(self.row, timestamp=when)
-        record = convert_record(row, mapped_config())[0]
-        self.assertEqual(
-            str(1_767_268_800_000 * 1_000_000),
-            otlp_span(record)["startTimeUnixNano"],
+        mapping = dict(MAPPING)
+        mapping["event_properties"] = dict(
+            MAPPING["event_properties"],
+            **{"[Agent] Latency Ms": "$.latency_ms"},
         )
+        row = dict(self.row, timestamp=when, latency_ms=250)
+        record = convert_record(row, mapped_config(mapping=mapping))[0]
+        span = otlp_span(record)
+        end_nanos = 1_767_268_800_000 * 1_000_000
+        self.assertEqual(str(end_nanos), span["endTimeUnixNano"])
+        self.assertEqual(str(end_nanos - 250 * 1_000_000), span["startTimeUnixNano"])
 
     def test_missing_ids_are_deterministic_valid_hex(self):
         row = dict(self.row, trace_id=None, span_id=None)
