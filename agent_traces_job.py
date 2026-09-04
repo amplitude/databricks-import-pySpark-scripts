@@ -787,6 +787,13 @@ def process_partition(
     for row in rows:
         stats["rows_read"] += 1
         source = row.asDict(recursive=True) if hasattr(row, "asDict") else row
+        session_id = derive_session_id(source, conversion_values)
+        if session_id is None or not str(session_id).strip():
+            stats["skipped_by_reason"]["missing_session_id"] = (
+                stats["skipped_by_reason"].get("missing_session_id", 0) + 1
+            )
+            stats["records_filtered"] += 1
+            continue
         converted, skipped = _conversion_outcome(source, conversion)
         for reason, count in skipped.items():
             stats["skipped_by_reason"][reason] = (

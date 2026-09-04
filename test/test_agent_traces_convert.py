@@ -49,6 +49,7 @@ MAPPING = {
     "time": "$.timestamp",
     "event_properties": {
         "[Agent] Agent ID": "$.agent_id",
+        "[Agent] Session ID": "$.session_id",
         "[Agent] Trace ID": "$.trace_id",
         "[Agent] Span ID": "$.span_id",
         "[Agent] Tool Input": "$.tool_input",
@@ -257,6 +258,7 @@ class MappedColumnsTests(unittest.TestCase):
             "identity": {"user": "user-1"},
             "timestamp": 1_735_689_600_000,
             "agent_id": "agent-1",
+            "session_id": "session-1",
             "trace_id": "a" * 32,
             "span_id": "b" * 16,
             "tool_input": {"password": "do-not-export-by-default"},

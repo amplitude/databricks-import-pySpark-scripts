@@ -573,7 +573,11 @@ def _validate_http_event(event: Mapping[str, Any], strict: bool) -> None:
 
 def _derived_hex(value: Any, length: int, material: Any) -> str:
     if value is not None and str(value).strip():
-        return _to_hex_id(value, length // 2, "identifier")
+        stripped = str(value).strip()
+        try:
+            return _to_hex_id(stripped, length // 2, "identifier")
+        except ConversionError:
+            return hashlib.sha256(stripped.encode("utf-8")).hexdigest()[:length]
     return hashlib.sha256(canonical_json(material).encode("utf-8")).hexdigest()[:length]
 
 
@@ -669,8 +673,10 @@ def _mapped_otlp_span(event: Mapping[str, Any], config: ConversionConfig) -> Map
         "status": status,
     }
     if properties.get("[Agent] Parent Span ID"):
-        span["parentSpanId"] = _to_hex_id(
-            properties["[Agent] Parent Span ID"], 8, "parent_span_id"
+        span["parentSpanId"] = _derived_hex(
+            properties["[Agent] Parent Span ID"],
+            16,
+            properties["[Agent] Parent Span ID"],
         )
     return {
         "resourceSpans": [
@@ -748,7 +754,7 @@ def _to_hex_id(value: Any, byte_length: int, field_name: str) -> str:
     binary = _binary_hex(value)
     if binary is not None:
         value = binary
-    text = str(value or "").replace("-", "").lower()
+    text = str(value or "").strip().replace("-", "").lower()
     required_length = byte_length * 2
     if len(text) != required_length or not re.match(r"^[0-9a-f]+$", text):
         raise ConversionError(
