@@ -100,7 +100,11 @@ _IDENTITY_KEYS = frozenset(
         "amplitude.session.id",
         "gen_ai.conversation.id",
         "session_id",
+        "sessionid",
         "conversation_id",
+        "conversationid",
+        "mlflow.trace.session",
+        "mlflow.trace.user",
         "[agent] session id",
         "[agent] agent id",
         "[agent] trace id",
@@ -115,11 +119,17 @@ _IDENTITY_KEYS = frozenset(
 _IDENTITY_KEY_SUFFIXES = frozenset(
     {
         "session_id",
+        "sessionid",
         "conversation_id",
+        "conversationid",
         "user_id",
         "userid",
         "device_id",
         "deviceid",
+        # MLflow's own trace tags, which _resource_attributes re-prefixes as
+        # mlflow.trace.* / mlflow.tag.* before sanitization runs.
+        "session",
+        "user",
     }
 )
 
