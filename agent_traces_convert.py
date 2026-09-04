@@ -599,9 +599,7 @@ def _is_error_flag(value: Any) -> bool:
     text = str(value).strip().lower()
     if text in {"", "false", "0", "no", "n", "off", "none", "null", "f"}:
         return False
-    if text in {"true", "1", "yes", "y", "on", "t"}:
-        return True
-    return False
+    return text in {"true", "1", "yes", "y", "on", "t"}
 
 
 def _derived_hex(value: Any, length: int, material: Any) -> str:
