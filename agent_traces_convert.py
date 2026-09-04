@@ -138,6 +138,8 @@ _SENSITIVE_KEY_PARTS = (
     "reasoning",
     "request",
     "response",
+    "spaninputs",
+    "spanoutputs",
     "tool.arguments",
     "tool.result",
 )
@@ -579,7 +581,7 @@ def _is_sensitive_attribute(name: str) -> bool:
     lowered = name.lower()
     segments = re.split(r"[.\[\]]+", lowered)
     for part in _SENSITIVE_KEY_PARTS:
-        if part in ("request", "response"):
+        if part in ("request", "response", "spaninputs", "spanoutputs"):
             if segments and segments[-1] == part:
                 return True
             continue
