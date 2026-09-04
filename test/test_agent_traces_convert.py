@@ -14,10 +14,12 @@ from agent_traces_convert import (
     ConversionError,
     Protocol,
     SourceFormat,
+    _to_hex_id,
     canonical_session_id,
     combine_payloads,
     convert_record,
     json_path_get,
+    normalize,
     stable_insert_id,
 )
 import agent_traces_job
@@ -76,6 +78,14 @@ class JsonPathTests(unittest.TestCase):
             json_path_get({"items": []}, "$..items")
 
 
+class SparkValueTests(unittest.TestCase):
+    def test_bytearray_normalizes_and_hex_ids(self):
+        payload = bytearray.fromhex("ab" * 16)
+        self.assertEqual("ab" * 16, normalize(payload))
+        self.assertEqual("ab" * 16, _to_hex_id(payload, 16, "trace_id"))
+        self.assertEqual("ab" * 16, _to_hex_id(bytes(payload), 16, "trace_id"))
+
+
 class MappedColumnsTests(unittest.TestCase):
     def setUp(self):
         self.row = {
@@ -128,7 +138,7 @@ class MappedColumnsTests(unittest.TestCase):
             "event_properties"
         ]["[Agent] Tool Input"]
         self.assertEqual("[email]", tool_input["email"])
-        self.assertEqual("([phone]", tool_input["us_phone"])
+        self.assertEqual("[phone]", tool_input["us_phone"])
         self.assertEqual("[phone]", tool_input["intl_phone"])
         self.assertEqual("[credit_card]", tool_input["card"])
         self.assertEqual("[ssn]", tool_input["ssn"])

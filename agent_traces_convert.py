@@ -144,7 +144,7 @@ _SENSITIVE_KEY_PARTS = (
 _REDACTED_BASE64 = "[base64 image redacted]"
 _BUILTIN_REDACTIONS = (
     (r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b", "[email]"),
-    (r"\b\(?([0-9]{3})\)?[-. ]?([0-9]{3})[-. ]?([0-9]{4})\b", "[phone]"),
+    (r"(?<!\w)\(?([0-9]{3})\)?[-. ]?([0-9]{3})[-. ]?([0-9]{4})\b", "[phone]"),
     (r"\b(?:\d{4}[-\s]?){3}\d{4}\b", "[credit_card]"),
     (r"\b\d{3}(?:-| )\d{2}(?:-| )\d{4}\b", "[ssn]"),
     (r"\b\d{1,3}(?:\.\d{1,3}){3}\b", "[ip_address]"),
@@ -161,11 +161,17 @@ _BUILTIN_REDACTIONS = (
 )
 
 
+def _binary_hex(value: Any) -> Optional[str]:
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value).hex()
+    return None
+
+
 def _json_default(value: Any) -> Any:
     if isinstance(value, (dt.date, dt.datetime)):
         return value.isoformat()
-    if isinstance(value, bytes):
-        return value.hex()
+    if _binary_hex(value) is not None:
+        return _binary_hex(value)
     if hasattr(value, "asDict"):
         return value.asDict(recursive=True)
     return str(value)
@@ -185,8 +191,8 @@ def normalize(value: Any) -> Any:
         return value.isoformat()
     if isinstance(value, dt.date):
         return value.isoformat()
-    if isinstance(value, bytes):
-        return value.hex()
+    if _binary_hex(value) is not None:
+        return _binary_hex(value)
     return value
 
 
@@ -460,8 +466,9 @@ def _parse_json_container(value: Any, field_name: str, default: Any) -> Any:
 
 
 def _to_hex_id(value: Any, byte_length: int, field_name: str) -> str:
-    if isinstance(value, bytes):
-        value = value.hex()
+    binary = _binary_hex(value)
+    if binary is not None:
+        value = binary
     text = str(value or "").replace("-", "").lower()
     required_length = byte_length * 2
     if len(text) != required_length or not re.match(r"^[0-9a-f]+$", text):
@@ -550,8 +557,9 @@ def _otlp_any_value(value: Any) -> Mapping[str, Any]:
         return {"doubleValue": value}
     if isinstance(value, str):
         return {"stringValue": value}
-    if isinstance(value, bytes):
-        return {"bytesValue": value.hex()}
+    binary = _binary_hex(value)
+    if binary is not None:
+        return {"bytesValue": binary}
     if isinstance(value, Mapping):
         return {
             "kvlistValue": {
