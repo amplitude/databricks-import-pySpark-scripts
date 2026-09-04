@@ -643,6 +643,33 @@ def _otlp_attributes(
     ]
 
 
+_SPAN_KIND_BY_ORDINAL = {
+    0: "SPAN_KIND_UNSPECIFIED",
+    1: "SPAN_KIND_INTERNAL",
+    2: "SPAN_KIND_SERVER",
+    3: "SPAN_KIND_CLIENT",
+    4: "SPAN_KIND_PRODUCER",
+    5: "SPAN_KIND_CONSUMER",
+}
+_SPAN_KIND_NAMES = frozenset(_SPAN_KIND_BY_ORDINAL.values())
+
+
+def _span_kind(kind: Any) -> str:
+    if kind is None or kind == "":
+        return "SPAN_KIND_INTERNAL"
+    if isinstance(kind, bool):
+        return "SPAN_KIND_INTERNAL"
+    if isinstance(kind, int):
+        return _SPAN_KIND_BY_ORDINAL.get(kind, "SPAN_KIND_INTERNAL")
+    name = str(kind).strip().upper()
+    if name.isdigit():
+        return _SPAN_KIND_BY_ORDINAL.get(int(name), "SPAN_KIND_INTERNAL")
+    if name in _SPAN_KIND_NAMES:
+        return name
+    prefixed = f"SPAN_KIND_{name}"
+    return prefixed if prefixed in _SPAN_KIND_NAMES else "SPAN_KIND_INTERNAL"
+
+
 def _status(status: Any) -> Mapping[str, Any]:
     status = _parse_json_container(status, "status", {})
     if isinstance(status, str):
@@ -691,7 +718,7 @@ def _convert_span(
         "traceId": _to_hex_id(trace_id, 16, "trace_id"),
         "spanId": _to_hex_id(span_id, 8, "span_id"),
         "name": str(span.get("name") or span.get("span_name") or "mlflow.span"),
-        "kind": str(span.get("kind", "SPAN_KIND_INTERNAL")).upper(),
+        "kind": _span_kind(span.get("kind")),
         "startTimeUnixNano": _unix_nanos(start, "span start time"),
         "endTimeUnixNano": _unix_nanos(end, "span end time"),
         "attributes": _otlp_attributes(

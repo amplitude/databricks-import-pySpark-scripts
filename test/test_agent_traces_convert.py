@@ -14,6 +14,7 @@ from agent_traces_convert import (
     ConversionError,
     Protocol,
     SourceFormat,
+    _span_kind,
     _to_hex_id,
     canonical_session_id,
     combine_payloads,
@@ -84,6 +85,22 @@ class SparkValueTests(unittest.TestCase):
         self.assertEqual("ab" * 16, normalize(payload))
         self.assertEqual("ab" * 16, _to_hex_id(payload, 16, "trace_id"))
         self.assertEqual("ab" * 16, _to_hex_id(bytes(payload), 16, "trace_id"))
+
+
+class SpanKindTests(unittest.TestCase):
+    def test_ordinals_and_short_names_normalize_to_otlp(self):
+        self.assertEqual("SPAN_KIND_INTERNAL", _span_kind(1))
+        self.assertEqual("SPAN_KIND_SERVER", _span_kind(2))
+        self.assertEqual("SPAN_KIND_CLIENT", _span_kind("3"))
+        self.assertEqual("SPAN_KIND_INTERNAL", _span_kind("INTERNAL"))
+        self.assertEqual("SPAN_KIND_PRODUCER", _span_kind("producer"))
+        self.assertEqual("SPAN_KIND_CONSUMER", _span_kind("SPAN_KIND_CONSUMER"))
+
+    def test_missing_and_unknown_default_to_internal(self):
+        self.assertEqual("SPAN_KIND_INTERNAL", _span_kind(None))
+        self.assertEqual("SPAN_KIND_INTERNAL", _span_kind(""))
+        self.assertEqual("SPAN_KIND_INTERNAL", _span_kind("CHAIN"))
+        self.assertEqual("SPAN_KIND_INTERNAL", _span_kind(99))
 
 
 class MappedColumnsTests(unittest.TestCase):
