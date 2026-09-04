@@ -28,6 +28,7 @@ from agent_traces_convert import (
     SourceFormat,
     canonical_session_id,
     combine_payloads,
+    configure_session_timezone,
     convert_record,
     validate_redaction_patterns,
 )
@@ -221,7 +222,7 @@ def _load_mapping(args: argparse.Namespace, dbutils: Any = None) -> Optional[Map
         if path.startswith(("dbfs:", "s3:", "s3a:", "abfss:")):
             if dbutils is None:
                 raise ValueError("dbutils is required to read mapping path {}".format(path))
-            raw = dbutils.fs.head(path, MAX_MAPPING_BYTES)
+            raw = dbutils.fs.head(path, MAX_MAPPING_BYTES + 1)
         else:
             with open(path, "r", encoding="utf-8") as handle:
                 raw = handle.read(MAX_MAPPING_BYTES + 1)
@@ -662,6 +663,7 @@ def process_partition(
     delivery_values: Mapping[str, Any],
 ) -> Iterator[Mapping[str, int]]:
     """Convert and deliver one Spark partition, yielding one small stats row."""
+    configure_session_timezone(conversion_values.get("session_timezone"))
     conversion = _conversion_config(conversion_values)
     protocol_override = delivery_values.get("protocol")
     if protocol_override is not None:
@@ -824,6 +826,11 @@ def run(
     )
     spark.sparkContext.addPyFile(converter_path)
 
+    conf = getattr(spark, "conf", None)
+    session_timezone = (
+        conf.get("spark.sql.session.timeZone", "UTC") if conf is not None else "UTC"
+    )
+    configure_session_timezone(session_timezone)
     conversion_values = {
         "source_format": args.source_format,
         "mapping": mapping,
@@ -834,6 +841,7 @@ def run(
         "custom_redaction_patterns": _parse_custom_redaction_patterns(
             args.custom_redaction_patterns_json
         ),
+        "session_timezone": session_timezone,
     }
     data_frame = _apply_watermarks(_read_source(spark, args), args)
     data_frame, session_stats = _apply_session_selection(

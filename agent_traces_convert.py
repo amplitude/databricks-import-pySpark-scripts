@@ -14,6 +14,7 @@ import hashlib
 import json
 import re
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from zoneinfo import ZoneInfo
 
 
 class ConversionError(ValueError):
@@ -164,6 +165,30 @@ _SENSITIVE_KEY_PARTS = (
 )
 _CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 _REDACTED_BASE64 = "[base64 image redacted]"
+_SESSION_TIMEZONE: Optional[str] = None
+
+
+def configure_session_timezone(name: Optional[str]) -> None:
+    """Set the Spark session timezone used to localize naive timestamps."""
+    global _SESSION_TIMEZONE
+    _SESSION_TIMEZONE = name
+
+
+def _session_tzinfo() -> dt.tzinfo:
+    if _SESSION_TIMEZONE:
+        try:
+            return ZoneInfo(_SESSION_TIMEZONE)
+        except Exception:
+            pass
+    return dt.timezone.utc
+
+
+def _as_utc_datetime(value: dt.datetime) -> dt.datetime:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=_session_tzinfo())
+    return value.astimezone(dt.timezone.utc)
+
+
 _BUILTIN_REDACTIONS = (
     (r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b", "[email]"),
     (r"(?<!\d)\(?([0-9]{3})\)?[-. ]?([0-9]{3})[-. ]?([0-9]{4})(?!\d)", "[phone]"),
@@ -208,9 +233,7 @@ def normalize(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [normalize(item) for item in value]
     if isinstance(value, dt.datetime):
-        if value.tzinfo is None:
-            value = value.replace(tzinfo=dt.timezone.utc)
-        return value.isoformat()
+        return _as_utc_datetime(value).isoformat()
     if isinstance(value, dt.date):
         return value.isoformat()
     if _binary_hex(value) is not None:
@@ -506,9 +529,7 @@ def _http_v2_time(value: Any, field_name: str = "time") -> int:
             "{} is required".format(field_name), reason="invalid_timestamp"
         )
     if isinstance(value, dt.datetime):
-        if value.tzinfo is None:
-            value = value.replace(tzinfo=dt.timezone.utc)
-        return int(value.timestamp() * 1000)
+        return int(_as_utc_datetime(value).timestamp() * 1000)
     if isinstance(value, (int, float)):
         return int(value)
     text = str(value).strip()
@@ -522,8 +543,8 @@ def _http_v2_time(value: Any, field_name: str = "time") -> int:
             reason="invalid_timestamp",
         )
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=dt.timezone.utc)
-    return int(parsed.timestamp() * 1000)
+        parsed = parsed.replace(tzinfo=_session_tzinfo())
+    return int(parsed.astimezone(dt.timezone.utc).timestamp() * 1000)
 
 
 def _unix_nanos(value: Any, field_name: str) -> str:
@@ -532,9 +553,7 @@ def _unix_nanos(value: Any, field_name: str) -> str:
             "{} is required".format(field_name), reason="invalid_timestamp"
         )
     if isinstance(value, dt.datetime):
-        if value.tzinfo is None:
-            value = value.replace(tzinfo=dt.timezone.utc)
-        return str(int(value.timestamp() * 1_000_000_000))
+        return str(int(_as_utc_datetime(value).timestamp() * 1_000_000_000))
     if isinstance(value, (int, float)):
         numeric = int(value)
         # MLflow schemas have used seconds, milliseconds, microseconds and nanos.
@@ -565,8 +584,8 @@ def _unix_nanos(value: Any, field_name: str) -> str:
             reason="invalid_timestamp",
         )
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=dt.timezone.utc)
-    return str(int(parsed.timestamp() * 1_000_000_000))
+        parsed = parsed.replace(tzinfo=_session_tzinfo())
+    return str(int(parsed.astimezone(dt.timezone.utc).timestamp() * 1_000_000_000))
 
 
 def _otlp_any_value(value: Any) -> Mapping[str, Any]:
