@@ -588,6 +588,22 @@ def _validate_http_event(event: Mapping[str, Any], strict: bool) -> None:
         raise ConversionError("strict essentials require {!r}".format(_AGENT_ID))
 
 
+def _is_error_flag(value: Any) -> bool:
+    """Interpret warehouse booleans, including stringly-typed columns."""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return bool(value) if math.isfinite(value) else False
+    text = str(value).strip().lower()
+    if text in {"", "false", "0", "no", "n", "off", "none", "null", "f"}:
+        return False
+    if text in {"true", "1", "yes", "y", "on", "t"}:
+        return True
+    return False
+
+
 def _derived_hex(value: Any, length: int, material: Any) -> str:
     text = str(value or "").strip().replace("-", "").lower()
     if len(text) == length and re.match(r"^[0-9a-f]+$", text):
@@ -668,7 +684,7 @@ def _mapped_otlp_span(event: Mapping[str, Any], config: ConversionConfig) -> Map
 
     status: Dict[str, Any] = {
         "code": "STATUS_CODE_ERROR"
-        if properties.get("[Agent] Is Error")
+        if _is_error_flag(properties.get("[Agent] Is Error"))
         else "STATUS_CODE_OK"
     }
     if properties.get("[Agent] Error Message"):

@@ -335,6 +335,21 @@ class MappedColumnsTests(unittest.TestCase):
             convert_record(row, mapped_config())
         self.assertEqual("missing_session_id", ctx.exception.reason)
 
+    def test_string_false_is_not_an_error_status(self):
+        mapping = dict(MAPPING)
+        mapping["event_properties"] = dict(
+            MAPPING["event_properties"],
+            **{"[Agent] Is Error": "$.is_error"},
+        )
+        for value in ("false", "0", "no", False, 0):
+            row = dict(self.row, is_error=value)
+            span = otlp_span(convert_record(row, mapped_config(mapping=mapping))[0])
+            self.assertEqual("STATUS_CODE_OK", span["status"]["code"], value)
+        for value in ("true", "1", "yes", True, 1):
+            row = dict(self.row, is_error=value)
+            span = otlp_span(convert_record(row, mapped_config(mapping=mapping))[0])
+            self.assertEqual("STATUS_CODE_ERROR", span["status"]["code"], value)
+
     def test_default_full_mode_redacts_builtin_pii_and_base64(self):
         row = dict(
             self.row,
