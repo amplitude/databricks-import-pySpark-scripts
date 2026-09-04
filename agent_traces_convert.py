@@ -226,6 +226,8 @@ _METADATA_ATTRIBUTE_ALLOWLIST = frozenset(
         "gen_ai.response.id",
         "gen_ai.response.finish_reason",
         "gen_ai.response.finish_reasons",
+        "gen_ai.tool.name",
+        "gen_ai.tool.call.id",
         "gen_ai.usage.input_tokens",
         "gen_ai.usage.output_tokens",
         "gen_ai.usage.reasoning.output_tokens",
@@ -1029,7 +1031,9 @@ def _status(status: Any, config: Optional[ConversionConfig] = None) -> Mapping[s
         }.get(code, "STATUS_CODE_UNSET")
     result: Dict[str, Any] = {"code": code}
     message = _first_present(status, "message", "description")
-    if message:
+    if message and (
+        config is None or config.content_mode != ContentMode.METADATA_ONLY
+    ):
         message = str(message)
         # Error text routinely embeds user content, so it gets the same
         # treatment as span attributes rather than passing through raw.
