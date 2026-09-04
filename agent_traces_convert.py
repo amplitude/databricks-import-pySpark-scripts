@@ -364,6 +364,23 @@ def _is_identity_key(name: str) -> bool:
     return lowered.rsplit(".", 1)[-1] in _IDENTITY_KEY_SUFFIXES
 
 
+def _is_secret_key(name: str) -> bool:
+    lowered = _CAMEL_BOUNDARY.sub("_", name).lower()
+    if lowered in _SECRET_KEY_PARTS:
+        return True
+    parts = re.split(r"[^a-z0-9]+", lowered)
+    if set(parts) & _SECRET_KEY_PARTS:
+        return True
+    for secret_part in _SECRET_KEY_PARTS:
+        secret_segments = re.split(r"[_.]+", secret_part)
+        if len(secret_segments) == 1:
+            continue
+        for index in range(len(parts) - len(secret_segments) + 1):
+            if parts[index : index + len(secret_segments)] == secret_segments:
+                return True
+    return False
+
+
 def _redact_content(
     value: Any, redact_pii: bool, custom_patterns: Sequence[str]
 ) -> Any:
@@ -373,11 +390,9 @@ def _redact_content(
         output = {}
         for key, item in value.items():
             key_text = str(key)
-            lowered = _CAMEL_BOUNDARY.sub("_", key_text).lower()
-            parts = set(re.split(r"[^a-z0-9]+", lowered))
             if _is_identity_key(key_text):
                 output[key] = item
-            elif lowered in _SECRET_KEY_PARTS or parts & _SECRET_KEY_PARTS:
+            elif _is_secret_key(key_text):
                 output[key] = "[secret]"
             else:
                 output[key] = _redact_content(item, redact_pii, custom_patterns)
@@ -809,8 +824,10 @@ def _unix_nanos(value: Any, field_name: str) -> str:
     return str(int(parsed.timestamp() * 1_000_000_000))
 
 
-def _otlp_any_value(value: Any) -> Mapping[str, Any]:
+def _otlp_any_value(value: Any) -> Optional[Mapping[str, Any]]:
     value = normalize(value)
+    if value is None:
+        return None
     if isinstance(value, bool):
         return {"boolValue": value}
     if isinstance(value, int):
@@ -823,17 +840,15 @@ def _otlp_any_value(value: Any) -> Mapping[str, Any]:
     if binary is not None:
         return {"bytesValue": binary}
     if isinstance(value, Mapping):
-        return {
-            "kvlistValue": {
-                "values": [
-                    {"key": str(key), "value": _otlp_any_value(item)}
-                    for key, item in value.items()
-                    if item is not None
-                ]
-            }
-        }
+        values = []
+        for key, item in value.items():
+            otlp_value = _otlp_any_value(item)
+            if otlp_value is not None:
+                values.append({"key": str(key), "value": otlp_value})
+        return {"kvlistValue": {"values": values}}
     if isinstance(value, Sequence):
-        return {"arrayValue": {"values": [_otlp_any_value(item) for item in value]}}
+        values = [otlp_value for item in value if (otlp_value := _otlp_any_value(item)) is not None]
+        return {"arrayValue": {"values": values}}
     return {"stringValue": str(value)}
 
 
@@ -898,22 +913,24 @@ def _otlp_attributes(
         return output
     if not isinstance(attributes, Mapping):
         raise ConversionError("attributes must be an object or OTLP attribute list")
-    return [
-        {
-            "key": str(key),
-            "value": _otlp_any_value(
-                value
-                if content_mode != ContentMode.FULL or _is_identity_key(str(key))
-                else _redact_content(value, redact_pii, custom_patterns)
-            ),
-        }
-        for key, value in attributes.items()
-        if value is not None
-        and not (
+    output = []
+    for key, value in attributes.items():
+        if value is None:
+            continue
+        if (
             content_mode == ContentMode.METADATA_ONLY
             and not _metadata_attribute_allowed(str(key))
+        ):
+            continue
+        otlp_value = _otlp_any_value(
+            value
+            if content_mode != ContentMode.FULL or _is_identity_key(str(key))
+            else _redact_content(value, redact_pii, custom_patterns)
         )
-    ]
+        if otlp_value is None:
+            continue
+        output.append({"key": str(key), "value": otlp_value})
+    return output
 
 
 _SPAN_KIND_BY_ORDINAL = {
