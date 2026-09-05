@@ -819,6 +819,16 @@ class MlflowUcTests(unittest.TestCase):
                 row, ConversionConfig(source_format=SourceFormat.MLFLOW_UC)
             )
 
+    def test_corrupt_metadata_json_keeps_the_row(self):
+        row = dict(self.row, trace_metadata="{not json", tags="also not json")
+        config = ConversionConfig(source_format=SourceFormat.MLFLOW_UC)
+        # canonical_session_id already tolerates this, so convert must too or the
+        # job groups the conversation and then drops every row in it.
+        row["trace_metadata"] = "{not json"
+        row["session_id"] = "session-1"
+        self.assertEqual("session-1", canonical_session_id(row, config))
+        self.assertTrue(convert_record(row, config))
+
     def test_plain_string_span_payloads_convert(self):
         row = dict(self.row)
         row["spans"] = [
@@ -994,9 +1004,13 @@ class _FakeAggregated:
 class _WatermarkFrame:
     """Driver-side stand-in for the aggregate path of the snapshot helper."""
 
-    def __init__(self, values, column):
+    def __init__(self, values, column, data_type=None):
         self.values = list(values)
         self.column = column
+        self.casts = []
+        if data_type is not None:
+            field = type("Field", (), {"name": column, "dataType": data_type})()
+            self.schema = type("Schema", (), {"fields": [field]})()
 
     def cache(self):
         return self
@@ -1004,6 +1018,8 @@ class _WatermarkFrame:
     def where(self, condition):
         kind, column, literal = condition
         assert kind == "lt" and column == self.column
+        if getattr(literal, "cast_type", None) is not None:
+            self.casts.append(literal.cast_type)
         bound = literal.value if isinstance(literal, _FakeLiteral) else literal
         return _WatermarkFrame([v for v in self.values if v < bound], self.column)
 
@@ -1017,11 +1033,12 @@ class _WatermarkFrame:
 
 
 class _FakeLiteral:
-    def __init__(self, value):
+    def __init__(self, value, cast_type=None):
         self.value = value
+        self.cast_type = cast_type
 
     def cast(self, data_type):
-        return self.value
+        return _FakeLiteral(self.value, data_type)
 
 
 def fake_pyspark_modules():
@@ -1122,6 +1139,19 @@ class JobOptionsTests(unittest.TestCase):
         # the 2026-01-10 session the cap held back.
         self.assertEqual("2026-01-05", upper)
         self.assertEqual("2026-01-20", unbounded)
+
+    def test_snapshot_casts_the_capped_bound_to_the_column_type(self):
+        frame = _WatermarkFrame(
+            ["2026-01-01", "2026-01-05", "2026-01-20"], "updated_at", "timestamp"
+        )
+        args = types.SimpleNamespace(watermark_column="updated_at", watermark_end=None)
+        with unittest.mock.patch.dict(sys.modules, fake_pyspark_modules()):
+            _, upper = agent_traces_job._snapshot_watermark_upper(
+                frame, args, below="2026-01-10"
+            )
+        # ANSI clusters reject a timestamp compared against a bare string.
+        self.assertEqual(["timestamp"], frame.casts)
+        self.assertEqual("2026-01-05", upper)
 
     def test_watermark_holds_when_every_kept_row_is_at_the_capped_bound(self):
         args = types.SimpleNamespace(

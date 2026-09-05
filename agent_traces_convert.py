@@ -1292,13 +1292,29 @@ def _mlflow_session_value(
     return None
 
 
+def _mlflow_containers(row: Mapping[str, Any]) -> Tuple[Any, Any]:
+    """Parse metadata and tags, tolerating corrupt JSON in either container.
+
+    Session grouping already ignores these parse errors, so raising here would
+    let the job select a conversation and then drop every one of its rows.
+    """
+    try:
+        metadata = _parse_json_container(
+            _first_present(row, "trace_metadata", "traceMetadata"), "trace_metadata", {}
+        )
+    except ConversionError:
+        metadata = {}
+    try:
+        tags = _parse_json_container(row.get("tags"), "tags", {})
+    except ConversionError:
+        tags = {}
+    return metadata, tags
+
+
 def _resource_attributes(
     row: Mapping[str, Any], config: ConversionConfig
 ) -> List[Mapping[str, Any]]:
-    metadata = _parse_json_container(
-        _first_present(row, "trace_metadata", "traceMetadata"), "trace_metadata", {}
-    )
-    tags = _parse_json_container(row.get("tags"), "tags", {})
+    metadata, tags = _mlflow_containers(row)
     attributes: Dict[str, Any] = {}
     if isinstance(metadata, Mapping):
         attributes.update({"mlflow.trace.{}".format(k): v for k, v in metadata.items()})
@@ -1470,18 +1486,7 @@ def canonical_session_id(
         from_row = _mlflow_session_value(row, {}, {})
         if from_row is not None:
             return from_row
-        try:
-            metadata = _parse_json_container(
-                _first_present(row, "trace_metadata", "traceMetadata"),
-                "trace_metadata",
-                {},
-            )
-        except ConversionError:
-            metadata = {}
-        try:
-            tags = _parse_json_container(row.get("tags"), "tags", {})
-        except ConversionError:
-            tags = {}
+        metadata, tags = _mlflow_containers(row)
         return _mlflow_session_value(row, metadata, tags)
     return None
 

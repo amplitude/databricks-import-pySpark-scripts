@@ -289,6 +289,15 @@ def _column_extreme(data_frame: Any, aggregate: Any, column: str) -> Any:
     return rows[0]["__agent_extreme"] if rows else None
 
 
+def _column_data_type(data_frame: Any, column: str) -> Any:
+    """Return the declared type of ``column``, or None for driver-only doubles."""
+    fields = getattr(getattr(data_frame, "schema", None), "fields", None) or ()
+    for field in fields:
+        if field.name == column:
+            return getattr(field, "dataType", None)
+    return None
+
+
 def _resolve_session_id_column(data_frame: Any, args: argparse.Namespace) -> Optional[str]:
     fields = {field.name for field in data_frame.schema.fields}
     if args.session_id_column:
@@ -969,11 +978,17 @@ def _snapshot_watermark_upper(
         from pyspark.sql import functions
 
         column = functions.col(args.watermark_column)
-        scoped = (
-            data_frame
-            if below is None
-            else data_frame.where(column < functions.lit(below))
-        )
+        if below is None:
+            scoped = data_frame
+        else:
+            # The bound is carried as text, so cast it back to the column type
+            # the way _apply_watermarks casts CLI bounds. An ANSI cluster fails
+            # analysis on a timestamp/long compared against a string.
+            bound = functions.lit(below)
+            data_type = _column_data_type(data_frame, args.watermark_column)
+            if data_type is not None:
+                bound = bound.cast(data_type)
+            scoped = data_frame.where(column < bound)
         value = _column_extreme(scoped, functions.max, args.watermark_column)
         return data_frame, None if value is None else str(value)
     except (AttributeError, TypeError):
