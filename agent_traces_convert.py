@@ -787,8 +787,8 @@ def _parse_json_container(value: Any, field_name: str, default: Any) -> Any:
             return default
         try:
             return json.loads(value)
-        except ValueError as exc:
-            raise ConversionError("{} contains invalid JSON: {}".format(field_name, exc))
+        except ValueError:
+            return value
     return value
 
 
