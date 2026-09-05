@@ -470,7 +470,7 @@ def _apply_session_selection(
     sampled_sessions = sampled_sessions.cache()
     sessions_sampled = sampled_sessions.count()
 
-    excluded_watermark_lower: Optional[str] = None
+    excluded_watermark_lower: Optional[Any] = None
     if args.max_sessions is not None:
         if args.watermark_column:
             # Oldest conversations first so the acknowledged watermark can
@@ -509,7 +509,7 @@ def _apply_session_selection(
                     _SESSION_WATERMARK,
                 )
                 if excluded_lower is not None:
-                    excluded_watermark_lower = str(excluded_lower)
+                    excluded_watermark_lower = excluded_lower
         else:
             # Ordering by the full digest is a total order over distinct
             # conversation IDs, so the same conversations survive the cap on every
@@ -953,7 +953,7 @@ def _watermark_payload(
 def _snapshot_watermark_upper(
     data_frame: Any,
     args: argparse.Namespace,
-    below: Optional[str] = None,
+    below: Optional[Any] = None,
 ) -> Tuple[Any, Optional[str]]:
     """Return the frame plus its max watermark, optionally under an exclusive bound.
 
@@ -969,11 +969,18 @@ def _snapshot_watermark_upper(
         from pyspark.sql import functions
 
         column = functions.col(args.watermark_column)
-        scoped = (
-            data_frame
-            if below is None
-            else data_frame.where(column < functions.lit(below))
-        )
+        if below is None:
+            scoped = data_frame
+        else:
+            bound = functions.lit(below)
+            if hasattr(data_frame, "schema"):
+                field = next(
+                    item
+                    for item in data_frame.schema.fields
+                    if item.name == args.watermark_column
+                )
+                bound = bound.cast(field.dataType)
+            scoped = data_frame.where(column < bound)
         value = _column_extreme(scoped, functions.max, args.watermark_column)
         return data_frame, None if value is None else str(value)
     except (AttributeError, TypeError):

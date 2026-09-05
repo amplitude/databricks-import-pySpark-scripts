@@ -1295,10 +1295,16 @@ def _mlflow_session_value(
 def _resource_attributes(
     row: Mapping[str, Any], config: ConversionConfig
 ) -> List[Mapping[str, Any]]:
-    metadata = _parse_json_container(
-        _first_present(row, "trace_metadata", "traceMetadata"), "trace_metadata", {}
-    )
-    tags = _parse_json_container(row.get("tags"), "tags", {})
+    try:
+        metadata = _parse_json_container(
+            _first_present(row, "trace_metadata", "traceMetadata"), "trace_metadata", {}
+        )
+    except ConversionError:
+        metadata = {}
+    try:
+        tags = _parse_json_container(row.get("tags"), "tags", {})
+    except ConversionError:
+        tags = {}
     attributes: Dict[str, Any] = {}
     if isinstance(metadata, Mapping):
         attributes.update({"mlflow.trace.{}".format(k): v for k, v in metadata.items()})
