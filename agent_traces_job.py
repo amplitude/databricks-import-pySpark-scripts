@@ -492,15 +492,20 @@ def _apply_session_selection(
             sampled_watermarks = sampled_sessions.join(
                 session_watermark, _SESSION_KEY, "inner"
             ).cache()
+            ranked_watermarks = sampled_watermarks.where(
+                functions.col(_SESSION_WATERMARK).isNotNull()
+            )
             boundary = _column_extreme(
-                sampled_watermarks.orderBy(_SESSION_WATERMARK, _SESSION_KEY).limit(
+                ranked_watermarks.orderBy(_SESSION_WATERMARK, _SESSION_KEY).limit(
                     args.max_sessions
                 ),
                 functions.max,
                 _SESSION_WATERMARK,
             )
             if boundary is None:
-                kept_sessions = sampled_sessions
+                kept_sessions = sampled_sessions.orderBy(session_digest).limit(
+                    args.max_sessions
+                )
             else:
                 # Keep every conversation tied at the boundary watermark. A
                 # partial tie would leave excluded conversations sharing the
