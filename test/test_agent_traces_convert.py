@@ -985,7 +985,7 @@ class JobOptionsTests(unittest.TestCase):
         self.assertFalse(payload["advanced"])
         self.assertEqual("2026-03-01", payload["snapshot_upper"])
 
-    def test_watermark_advances_selected_window_after_partial_cap(self):
+    def test_watermark_holds_when_capped_sessions_remain_after_success(self):
         args = types.SimpleNamespace(
             dry_run=False,
             watermark_column="updated_at",
@@ -1000,8 +1000,9 @@ class JobOptionsTests(unittest.TestCase):
             sessions_sampled=10,
             sessions_kept=2,
         )
-        self.assertEqual("2026-01-15", payload["end_inclusive"])
-        self.assertTrue(payload["advanced"])
+        self.assertIsNone(payload["end_inclusive"])
+        self.assertFalse(payload["advanced"])
+        self.assertEqual("2026-03-01", payload["snapshot_upper"])
 
     def test_validates_sampling_and_custom_patterns(self):
         with self.assertRaisesRegex(ValueError, "sample-rate"):

@@ -789,6 +789,14 @@ def _parse_json_container(value: Any, field_name: str, default: Any) -> Any:
     return value
 
 
+def _parse_json_container_lenient(value: Any, default: Any) -> Any:
+    """Parse JSON containers without failing session-key resolution."""
+    try:
+        return _parse_json_container(value, "container", default)
+    except ConversionError:
+        return default
+
+
 def _to_hex_id(value: Any, byte_length: int, field_name: str) -> str:
     binary = _binary_hex(value)
     if binary is not None:
@@ -1425,25 +1433,29 @@ def canonical_session_id(
         override = _column_override(row, config.session_id_column)
         if override is not None:
             return override
-        if not config.mapping:
+        mapping = config.mapping
+        if not mapping:
             return None
-        event = _drop_none(_resolve(config.mapping, row))
-        if not isinstance(event, Mapping):
-            return None
-        properties = event.get("event_properties")
-        if not isinstance(properties, Mapping):
-            return None
-        return _canonical_session_value(properties.get(_SESSION_ID))
+        event_properties = mapping.get("event_properties")
+        if isinstance(event_properties, Mapping):
+            session_spec = event_properties.get(_SESSION_ID)
+            if session_spec is not None:
+                try:
+                    return _canonical_session_value(_resolve(session_spec, row))
+                except ConversionError:
+                    return None
+        return None
     if config.source_format == SourceFormat.MLFLOW_UC:
         override = _column_override(row, config.session_id_column)
         if override is not None:
             return override
-        metadata = _parse_json_container(
-            _first_present(row, "trace_metadata", "traceMetadata"),
-            "trace_metadata",
-            {},
+        session_id = _mlflow_session_value(row, {}, {})
+        if session_id is not None:
+            return session_id
+        metadata = _parse_json_container_lenient(
+            _first_present(row, "trace_metadata", "traceMetadata"), {}
         )
-        tags = _parse_json_container(row.get("tags"), "tags", {})
+        tags = _parse_json_container_lenient(row.get("tags"), {})
         return _mlflow_session_value(row, metadata, tags)
     return None
 

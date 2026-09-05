@@ -891,12 +891,12 @@ def _watermark_payload(
     )
     if args.dry_run:
         end_inclusive = None
+    elif leftover:
+        # Capped selection left conversations unprocessed. Hold the cursor so
+        # overlapping sessions in the same window are not permanently skipped.
+        end_inclusive = None
     elif records_converted > 0:
         end_inclusive = selected_upper
-    elif leftover:
-        # Oldest capped conversations failed conversion. Hold the cursor so
-        # later sessions in the same window are not permanently skipped.
-        end_inclusive = None
     else:
         end_inclusive = (
             selected_upper if selected_upper is not None else source_upper
