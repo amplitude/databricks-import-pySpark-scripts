@@ -40,7 +40,9 @@ OTLP_ENDPOINTS = {
 RESULT_PREFIX = "AGENT_TRACES_JOB_RESULT="
 MAX_MAPPING_BYTES = 1_048_576
 MAX_OTLP_REQUEST_BYTES = 900 * 1024
-MAX_OTLP_SPANS = 2000
+# Chat spans fan out to two [Agent] events. Keep each POST under the receiver
+# MAX_EVENTS_PER_EXPORT of 2_000 translated events.
+MAX_OTLP_SPANS = 1000
 MAX_RETRY_AFTER_SECONDS = 60.0
 
 
@@ -170,8 +172,6 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Tuple[argparse.Namespace
     args, unknown = build_parser().parse_known_args(argv)
     if bool(args.watermark_start or args.watermark_end) and not args.watermark_column:
         raise ValueError("watermark bounds require --watermark-column")
-    if args.watermark_column and not (args.watermark_start or args.watermark_end):
-        raise ValueError("--watermark-column requires at least one watermark bound")
     if args.source_format == SourceFormat.MAPPED_COLUMNS.value and not (
         args.mapping_json or args.mapping_json_path
     ):
@@ -464,12 +464,27 @@ def _apply_session_selection(
     sessions_sampled = sampled_sessions.count()
 
     if args.max_sessions is not None:
-        # Ordering by the full digest is a total order over distinct
-        # conversation IDs, so the same conversations survive the cap on every
-        # run regardless of partitioning or row order.
-        kept_sessions = sampled_sessions.orderBy(session_digest).limit(
-            args.max_sessions
-        )
+        if args.watermark_column:
+            # Oldest conversations first so the acknowledged watermark can
+            # advance through a capped window without skipping later sessions.
+            session_watermark = with_session.groupBy(_SESSION_KEY).agg(
+                functions.min(functions.col(args.watermark_column)).alias(
+                    "__agent_session_watermark"
+                )
+            )
+            kept_sessions = (
+                sampled_sessions.join(session_watermark, _SESSION_KEY, "inner")
+                .orderBy("__agent_session_watermark", _SESSION_KEY)
+                .limit(args.max_sessions)
+                .select(_SESSION_KEY)
+            )
+        else:
+            # Ordering by the full digest is a total order over distinct
+            # conversation IDs, so the same conversations survive the cap on every
+            # run regardless of partitioning or row order.
+            kept_sessions = sampled_sessions.orderBy(session_digest).limit(
+                args.max_sessions
+            )
     else:
         kept_sessions = sampled_sessions
     kept_sessions = kept_sessions.cache()
@@ -859,6 +874,47 @@ def _sum_stats(partition_stats: Iterable[Mapping[str, Any]]) -> Dict[str, Any]:
     return totals
 
 
+def _watermark_payload(
+    args: argparse.Namespace,
+    *,
+    source_upper: Optional[str],
+    selected_upper: Optional[str],
+    records_converted: int,
+    sessions_sampled: Optional[int],
+    sessions_kept: Optional[int],
+) -> Dict[str, Any]:
+    leftover = (
+        args.max_sessions is not None
+        and sessions_sampled is not None
+        and sessions_kept is not None
+        and sessions_sampled > sessions_kept
+    )
+    if args.dry_run:
+        end_inclusive = None
+    elif records_converted > 0:
+        end_inclusive = selected_upper
+    elif leftover:
+        # Oldest capped conversations failed conversion. Hold the cursor so
+        # later sessions in the same window are not permanently skipped.
+        end_inclusive = None
+    else:
+        end_inclusive = (
+            selected_upper if selected_upper is not None else source_upper
+        )
+    return {
+        "column": args.watermark_column,
+        "start_exclusive": args.watermark_start,
+        "end_inclusive": end_inclusive,
+        "snapshot_upper": source_upper,
+        "acknowledged_upper": end_inclusive,
+        "advanced": bool(
+            not args.dry_run
+            and args.watermark_column
+            and end_inclusive is not None
+        ),
+    }
+
+
 def _snapshot_watermark_upper(
     data_frame: Any, args: argparse.Namespace
 ) -> Tuple[Any, Optional[str]]:
@@ -954,10 +1010,11 @@ def run(
     }
     data_frame = _apply_watermarks(_read_source(spark, args), args)
     _validate_override_columns(data_frame, args)
-    data_frame, watermark_upper = _snapshot_watermark_upper(data_frame, args)
+    data_frame, source_watermark_upper = _snapshot_watermark_upper(data_frame, args)
     data_frame, session_stats = _apply_session_selection(
         data_frame, args, conversion_values
     )
+    data_frame, selected_watermark_upper = _snapshot_watermark_upper(data_frame, args)
 
     api_key = None
     if not args.dry_run:
@@ -1015,24 +1072,16 @@ def run(
         "strict_essentials": bool(args.strict_essentials),
         "server_zone": args.server_zone,
         # This job does not persist a warehouse cursor. After live delivery it
-        # reports the snapshot max as acknowledged_upper / end_inclusive so
-        # Falcon can advance; dry-run leaves those null.
-        "watermark": {
-            "column": args.watermark_column,
-            "start_exclusive": args.watermark_start,
-            "end_inclusive": (
-                watermark_upper if not args.dry_run else None
-            ),
-            "snapshot_upper": watermark_upper,
-            "acknowledged_upper": (
-                watermark_upper if not args.dry_run and watermark_upper is not None else None
-            ),
-            "advanced": bool(
-                not args.dry_run
-                and args.watermark_column
-                and watermark_upper is not None
-            ),
-        },
+        # reports the selected-window max as acknowledged_upper / end_inclusive
+        # so Falcon can advance without skipping unprocessed sessions.
+        "watermark": _watermark_payload(
+            args,
+            source_upper=source_watermark_upper,
+            selected_upper=selected_watermark_upper,
+            records_converted=int(totals.get("records_converted") or 0),
+            sessions_sampled=session_stats.get("sessions_sampled"),
+            sessions_kept=session_stats.get("sessions_kept"),
+        ),
         "started_at": started.isoformat(),
         "completed_at": completed.isoformat(),
         "duration_ms": int((completed - started).total_seconds() * 1000),

@@ -221,7 +221,7 @@ class StatusMessageTests(unittest.TestCase):
         status = _status(
             {"code": "ERROR", "message": "user said secret@example.com"}, config
         )
-        self.assertEqual("STATUS_CODE_ERROR", status["code"])
+        self.assertEqual(2, status["code"])
         self.assertNotIn("message", status)
 
 
@@ -246,6 +246,16 @@ class SpecialFloatTests(unittest.TestCase):
             with self.assertRaises(ConversionError) as ctx:
                 _unix_nanos(value, "span start time")
             self.assertEqual("invalid_timestamp", ctx.exception.reason)
+
+
+    def test_bool_timestamps_are_rejected(self):
+        with self.assertRaises(ConversionError) as ctx:
+            _http_v2_time(True)
+        self.assertEqual("invalid_timestamp", ctx.exception.reason)
+
+    def test_epoch_seconds_are_coerced_to_millis(self):
+        self.assertEqual(1_735_689_600_000, _http_v2_time(1_735_689_600))
+        self.assertEqual(1_735_689_600_000, _http_v2_time("1735689600"))
 
 
 class SpanKindTests(unittest.TestCase):
@@ -344,11 +354,11 @@ class MappedColumnsTests(unittest.TestCase):
         for value in ("false", "0", "no", False, 0):
             row = dict(self.row, is_error=value)
             span = otlp_span(convert_record(row, mapped_config(mapping=mapping))[0])
-            self.assertEqual("STATUS_CODE_OK", span["status"]["code"], value)
+            self.assertEqual(1, span["status"]["code"], value)
         for value in ("true", "1", "yes", True, 1):
             row = dict(self.row, is_error=value)
             span = otlp_span(convert_record(row, mapped_config(mapping=mapping))[0])
-            self.assertEqual("STATUS_CODE_ERROR", span["status"]["code"], value)
+            self.assertEqual(2, span["status"]["code"], value)
 
     def test_default_full_mode_redacts_builtin_pii_and_base64(self):
         row = dict(
@@ -688,7 +698,7 @@ class MlflowUcTests(unittest.TestCase):
         self.assertEqual("05" * 8, span["parentSpanId"])
         self.assertEqual(str(_unix_nanos(start, "span start time")), span["startTimeUnixNano"])
         self.assertEqual(str(_unix_nanos(end, "span end time")), span["endTimeUnixNano"])
-        self.assertEqual("STATUS_CODE_OK", span["status"]["code"])
+        self.assertEqual(1, span["status"]["code"])
 
     def test_builds_otlp_json_and_strips_content(self):
         config = ConversionConfig(
@@ -824,6 +834,26 @@ class MlflowUcTests(unittest.TestCase):
         )
         self.assertEqual("session-row", canonical_session_id(row, config))
 
+    def test_encoded_otlp_attribute_list_is_unwrapped(self):
+        row = dict(self.row)
+        row["spans"] = [
+            dict(
+                self.row["spans"][0],
+                attributes=[
+                    {"key": "mlflow.spanType", "value": {"stringValue": "LLM"}},
+                    {
+                        "key": "gen_ai.request.model",
+                        "value": {"stringValue": "gpt-listed"},
+                    },
+                ],
+            )
+        ]
+        attrs = span_attributes(
+            convert_record(row, ConversionConfig(source_format=SourceFormat.MLFLOW_UC))[0]
+        )
+        self.assertEqual("chat", attrs["gen_ai.operation.name"])
+        self.assertEqual("gpt-listed", attrs["gen_ai.request.model"])
+
 
 class _FakeSchema:
     def __init__(self, column_names):
@@ -918,6 +948,60 @@ class JobOptionsTests(unittest.TestCase):
         self.assertIsNone(args.max_sessions)
         self.assertEqual(MAX_OTLP_REQUEST_BYTES, args.max_request_bytes)
         self.assertIsNone(args.user_id_column)
+
+    def test_watermark_column_without_bounds_is_allowed(self):
+        args, unknown = parse_args(
+            [
+                "--table",
+                "t",
+                "--format",
+                "mlflow-uc",
+                "--dry-run",
+                "--watermark-column",
+                "updated_at",
+            ]
+        )
+        self.assertEqual([], unknown)
+        self.assertEqual("updated_at", args.watermark_column)
+        self.assertIsNone(args.watermark_start)
+        self.assertIsNone(args.watermark_end)
+
+    def test_watermark_holds_when_capped_sessions_convert_nothing(self):
+        args = types.SimpleNamespace(
+            dry_run=False,
+            watermark_column="updated_at",
+            watermark_start="2026-01-01",
+            max_sessions=2,
+        )
+        payload = agent_traces_job._watermark_payload(
+            args,
+            source_upper="2026-03-01",
+            selected_upper="2026-01-15",
+            records_converted=0,
+            sessions_sampled=10,
+            sessions_kept=2,
+        )
+        self.assertIsNone(payload["end_inclusive"])
+        self.assertFalse(payload["advanced"])
+        self.assertEqual("2026-03-01", payload["snapshot_upper"])
+
+    def test_watermark_advances_selected_window_after_partial_cap(self):
+        args = types.SimpleNamespace(
+            dry_run=False,
+            watermark_column="updated_at",
+            watermark_start="2026-01-01",
+            max_sessions=2,
+        )
+        payload = agent_traces_job._watermark_payload(
+            args,
+            source_upper="2026-03-01",
+            selected_upper="2026-01-15",
+            records_converted=4,
+            sessions_sampled=10,
+            sessions_kept=2,
+        )
+        self.assertEqual("2026-01-15", payload["end_inclusive"])
+        self.assertTrue(payload["advanced"])
 
     def test_validates_sampling_and_custom_patterns(self):
         with self.assertRaisesRegex(ValueError, "sample-rate"):

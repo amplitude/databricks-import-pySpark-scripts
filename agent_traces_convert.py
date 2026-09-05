@@ -681,9 +681,7 @@ def _mapped_otlp_span(event: Mapping[str, Any], config: ConversionConfig) -> Map
         name = event_type
 
     status: Dict[str, Any] = {
-        "code": "STATUS_CODE_ERROR"
-        if _is_error_flag(properties.get("[Agent] Is Error"))
-        else "STATUS_CODE_OK"
+        "code": 2 if _is_error_flag(properties.get("[Agent] Is Error")) else 1
     }
     if properties.get("[Agent] Error Message"):
         status["message"] = properties["[Agent] Error Message"]
@@ -809,6 +807,11 @@ def _http_v2_time(value: Any, field_name: str = "time") -> int:
         raise ConversionError(
             "{} is required".format(field_name), reason="invalid_timestamp"
         )
+    if isinstance(value, bool):
+        raise ConversionError(
+            "{} is not a timestamp: {!r}".format(field_name, value),
+            reason="invalid_timestamp",
+        )
     if isinstance(value, dt.datetime):
         if value.tzinfo is None:
             value = value.replace(tzinfo=dt.timezone.utc)
@@ -819,10 +822,21 @@ def _http_v2_time(value: Any, field_name: str = "time") -> int:
                 "{} is not a timestamp: {!r}".format(field_name, value),
                 reason="invalid_timestamp",
             )
-        return int(value)
+        numeric = float(value)
+        magnitude = abs(numeric)
+        epoch_seconds_ceiling = 100_000_000_000
+        epoch_millis_ceiling = 100_000_000_000_000
+        epoch_micros_ceiling = 100_000_000_000_000_000
+        if magnitude < epoch_seconds_ceiling:
+            return int(numeric * 1000)
+        if magnitude < epoch_millis_ceiling:
+            return int(numeric)
+        if magnitude < epoch_micros_ceiling:
+            return int(numeric // 1000)
+        return int(numeric // 1_000_000)
     text = str(value).strip()
     if re.match(r"^-?\d+$", text):
-        return int(text)
+        return _http_v2_time(int(text), field_name)
     try:
         parsed = dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
@@ -1029,26 +1043,73 @@ def _span_kind(kind: Any) -> str:
     return prefixed if prefixed in _SPAN_KIND_NAMES else "SPAN_KIND_INTERNAL"
 
 
+def _otlp_status_code(code: Any) -> int:
+    if isinstance(code, bool):
+        return 0
+    if isinstance(code, int):
+        return code if code in (0, 1, 2) else 0
+    text = str(code or "").strip().upper()
+    if re.fullmatch(r"-?\d+", text):
+        numeric = int(text)
+        return numeric if numeric in (0, 1, 2) else 0
+    if text.startswith("STATUS_CODE_"):
+        text = text[len("STATUS_CODE_") :]
+    return {"OK": 1, "ERROR": 2, "UNSET": 0}.get(text, 0)
+
+
+def _unwrap_otlp_any_value(value: Any) -> Any:
+    if not isinstance(value, Mapping):
+        return value
+    if "stringValue" in value:
+        return value["stringValue"]
+    if "boolValue" in value:
+        return value["boolValue"]
+    if "intValue" in value:
+        raw = value["intValue"]
+        if isinstance(raw, bool):
+            return raw
+        if isinstance(raw, int):
+            return raw
+        try:
+            return int(str(raw).strip(), 10)
+        except ValueError:
+            return raw
+    if "doubleValue" in value:
+        return value["doubleValue"]
+    if "bytesValue" in value:
+        return value["bytesValue"]
+    if "arrayValue" in value:
+        items = (
+            value["arrayValue"].get("values")
+            if isinstance(value["arrayValue"], Mapping)
+            else None
+        )
+        if isinstance(items, list):
+            return [_unwrap_otlp_any_value(item) for item in items]
+    if "kvlistValue" in value:
+        items = (
+            value["kvlistValue"].get("values")
+            if isinstance(value["kvlistValue"], Mapping)
+            else None
+        )
+        if isinstance(items, list):
+            return {
+                str(item.get("key")): _unwrap_otlp_any_value(item.get("value"))
+                for item in items
+                if isinstance(item, Mapping)
+            }
+    return value
+
+
 def _status(status: Any, config: Optional[ConversionConfig] = None) -> Mapping[str, Any]:
     status = _parse_json_container(status, "status", {})
     if isinstance(status, str):
         status = {"code": status}
     if not isinstance(status, Mapping):
         return {}
-    code = _first_present(status, "code", "status_code", default="STATUS_CODE_UNSET")
-    if isinstance(code, int):
-        code = {
-            0: "STATUS_CODE_UNSET",
-            1: "STATUS_CODE_OK",
-            2: "STATUS_CODE_ERROR",
-        }.get(code, "STATUS_CODE_UNSET")
-    code = str(code).upper()
-    if not code.startswith("STATUS_CODE_"):
-        code = {
-            "OK": "STATUS_CODE_OK",
-            "ERROR": "STATUS_CODE_ERROR",
-            "UNSET": "STATUS_CODE_UNSET",
-        }.get(code, "STATUS_CODE_UNSET")
+    code = _otlp_status_code(
+        _first_present(status, "code", "status_code", default="STATUS_CODE_UNSET")
+    )
     result: Dict[str, Any] = {"code": code}
     if config is not None and config.content_mode == ContentMode.METADATA_ONLY:
         return result
@@ -1079,9 +1140,16 @@ def _convert_span(
     )
     end = _first_present(span, "end_time_unix_nano", "endTimeUnixNano", "end_time")
     raw_attributes = _parse_json_container(span.get("attributes", {}), "attributes", {})
-    if not isinstance(raw_attributes, Mapping):
-        raise ConversionError("span attributes must be an object")
-    attributes = dict(raw_attributes)
+    if isinstance(raw_attributes, list):
+        attributes = {
+            str(attribute.get("key")): _unwrap_otlp_any_value(attribute.get("value"))
+            for attribute in raw_attributes
+            if isinstance(attribute, Mapping) and attribute.get("key") is not None
+        }
+    elif isinstance(raw_attributes, Mapping):
+        attributes = dict(raw_attributes)
+    else:
+        raise ConversionError("span attributes must be an object or OTLP attribute list")
     span_type = str(
         span.get("span_type")
         or span.get("spanType")
