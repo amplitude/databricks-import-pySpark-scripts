@@ -834,6 +834,17 @@ class MlflowUcTests(unittest.TestCase):
         )
         self.assertEqual("session-row", canonical_session_id(row, config))
 
+    def test_invalid_tags_json_does_not_hide_row_session_id(self):
+        row = dict(self.row, session_id="session-row", tags="{not-json")
+        config = ConversionConfig(source_format=SourceFormat.MLFLOW_UC)
+        self.assertEqual("session-row", canonical_session_id(row, config))
+        self.assertEqual("session-row", derive_session_id(row, {
+            "source_format": SourceFormat.MLFLOW_UC.value,
+            "content_mode": ContentMode.FULL.value,
+            "strict_essentials": False,
+            "redact_pii": True,
+        }))
+
     def test_encoded_otlp_attribute_list_is_unwrapped(self):
         row = dict(self.row)
         row["spans"] = [

@@ -1438,12 +1438,21 @@ def canonical_session_id(
         override = _column_override(row, config.session_id_column)
         if override is not None:
             return override
-        metadata = _parse_json_container(
-            _first_present(row, "trace_metadata", "traceMetadata"),
-            "trace_metadata",
-            {},
-        )
-        tags = _parse_json_container(row.get("tags"), "tags", {})
+        from_row = _mlflow_session_value(row, {}, {})
+        if from_row is not None:
+            return from_row
+        try:
+            metadata = _parse_json_container(
+                _first_present(row, "trace_metadata", "traceMetadata"),
+                "trace_metadata",
+                {},
+            )
+        except ConversionError:
+            metadata = {}
+        try:
+            tags = _parse_json_container(row.get("tags"), "tags", {})
+        except ConversionError:
+            tags = {}
         return _mlflow_session_value(row, metadata, tags)
     return None
 
