@@ -311,6 +311,21 @@ class MappedColumnsTests(unittest.TestCase):
         self.assertEqual(first_span["traceId"], second_span["traceId"])
         self.assertNotEqual(first_span["spanId"], second_span["spanId"])
 
+    def test_numeric_and_string_span_ids_hash_alike(self):
+        mapping = dict(MAPPING)
+        mapping["event_properties"] = dict(
+            MAPPING["event_properties"],
+            **{"[Agent] Parent Span ID": "$.parent_span_id"},
+        )
+        config = mapped_config(mapping=mapping)
+        parent = convert_record(dict(self.row, span_id=90210), config)[0]
+        child = convert_record(
+            dict(self.row, span_id="c" * 16, parent_span_id="90210"), config
+        )[0]
+        self.assertEqual(
+            otlp_span(parent)["spanId"], otlp_span(child)["parentSpanId"]
+        )
+
     def test_rows_in_different_conversations_get_distinct_traces(self):
         first = dict(self.row, trace_id=None)
         second = dict(self.row, trace_id=None, session_id="session-2")
@@ -803,6 +818,28 @@ class MlflowUcTests(unittest.TestCase):
             convert_record(
                 row, ConversionConfig(source_format=SourceFormat.MLFLOW_UC)
             )
+
+    def test_plain_string_span_payloads_convert(self):
+        row = dict(self.row)
+        row["spans"] = [
+            dict(
+                self.row["spans"][0],
+                span_type="LLM",
+                inputs="what is the weather?",
+                outputs="it is sunny",
+                status="OK",
+            )
+        ]
+        config = ConversionConfig(source_format=SourceFormat.MLFLOW_UC)
+        span = convert_record(row, config)[0].payload["resourceSpans"][0]["scopeSpans"][
+            0
+        ]["spans"][0]
+        attrs = {
+            item["key"]: decode_any(item["value"]) for item in span["attributes"]
+        }
+        self.assertEqual("what is the weather?", attrs["gen_ai.input.messages"])
+        self.assertEqual("it is sunny", attrs["gen_ai.output.messages"])
+        self.assertEqual(1, span["status"]["code"])
 
     def test_combines_otlp_chunks(self):
         config = ConversionConfig(source_format=SourceFormat.MLFLOW_UC)
@@ -1308,7 +1345,17 @@ class JobOptionsTests(unittest.TestCase):
             "trace_metadata": json.dumps({"conversation_id": "conversation-meta"}),
             "tags": json.dumps({"session_id": "session-tag"}),
         }
-        self.assertEqual("conversation-meta", derive_session_id(metadata_row, values))
+        # session_id is the warehouse contract, so it outranks the
+        # conversation_id alias no matter which container holds it.
+        self.assertEqual("session-tag", derive_session_id(metadata_row, values))
+        same_key_row = {
+            "trace_id": "tie-trace",
+            "request_id": "tie-request",
+            "trace_metadata": json.dumps({"session_id": "session-meta"}),
+            "tags": json.dumps({"session_id": "session-tag"}),
+        }
+        # Container order still breaks ties between equal-priority keys.
+        self.assertEqual("session-meta", derive_session_id(same_key_row, values))
         tag_row = {
             "trace_id": "other-trace",
             "request_id": "other-request",

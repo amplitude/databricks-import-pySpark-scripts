@@ -606,6 +606,11 @@ def _derived_hex(value: Any, length: int, material: Any) -> str:
     text = str(value or "").strip().replace("-", "").lower()
     if len(text) == length and re.match(r"^[0-9a-f]+$", text):
         return text
+    if not isinstance(material, (Mapping, list, tuple)):
+        # Warehouse columns type the same ID differently (an integer span_id
+        # against a string parent_span_id), so hash the text form or the two
+        # sides would never agree and parent links would break.
+        material = str(material).strip()
     return hashlib.sha256(canonical_json(material).encode("utf-8")).hexdigest()[:length]
 
 
@@ -778,7 +783,16 @@ def _convert_mapped(row: Mapping[str, Any], config: ConversionConfig) -> List[Co
     ]
 
 
-def _parse_json_container(value: Any, field_name: str, default: Any) -> Any:
+def _parse_json_container(
+    value: Any, field_name: str, default: Any, text_is_value: bool = False
+) -> Any:
+    """Decode a JSON-encoded container column.
+
+    ``text_is_value`` marks fields whose warehouse form may already be a plain
+    string rather than JSON -- prompts, tool payloads and status names. Those
+    are values in their own right, so a decode failure returns the text instead
+    of rejecting the row.
+    """
     if value is None:
         return default
     value = normalize(value)
@@ -788,6 +802,8 @@ def _parse_json_container(value: Any, field_name: str, default: Any) -> Any:
         try:
             return json.loads(value)
         except ValueError as exc:
+            if text_is_value:
+                return value
             raise ConversionError("{} contains invalid JSON: {}".format(field_name, exc))
     return value
 
@@ -1105,7 +1121,7 @@ def _unwrap_otlp_any_value(value: Any) -> Any:
 
 
 def _status(status: Any, config: Optional[ConversionConfig] = None) -> Mapping[str, Any]:
-    status = _parse_json_container(status, "status", {})
+    status = _parse_json_container(status, "status", {}, text_is_value=True)
     if isinstance(status, str):
         status = {"code": status}
     if not isinstance(status, Mapping):
@@ -1187,7 +1203,9 @@ def _convert_span(
         return value
 
     if raw_input is not None:
-        parsed_input = _parse_json_container(raw_input, "span input", raw_input)
+        parsed_input = _parse_json_container(
+            raw_input, "span input", raw_input, text_is_value=True
+        )
         if operation == "execute_tool":
             attributes.setdefault("gen_ai.tool.call.arguments", parsed_input)
         else:
@@ -1195,7 +1213,9 @@ def _convert_span(
                 "gen_ai.input.messages", message_value(parsed_input, "user")
             )
     if raw_output is not None:
-        parsed_output = _parse_json_container(raw_output, "span output", raw_output)
+        parsed_output = _parse_json_container(
+            raw_output, "span output", raw_output, text_is_value=True
+        )
         if operation == "execute_tool":
             attributes.setdefault("gen_ai.tool.call.result", parsed_output)
         else:
@@ -1256,10 +1276,16 @@ def _mlflow_session_value(
     Shared by ``canonical_session_id`` and ``_resource_attributes`` so sampling
     groups by exactly the session Amplitude receives.
     """
-    for container in (row, metadata, tags):
-        if not isinstance(container, Mapping):
-            continue
-        for key in _MLFLOW_SESSION_KEYS:
+    containers = [
+        container
+        for container in (row, metadata, tags)
+        if isinstance(container, Mapping)
+    ]
+    # Key-major: session_id is the warehouse contract, so it wins wherever it
+    # lives rather than losing to a lower-priority alias that happens to sit in
+    # an earlier container. Matches the user-identity lookup.
+    for key in _MLFLOW_SESSION_KEYS:
+        for container in containers:
             session_id = _canonical_session_value(container.get(key))
             if session_id is not None:
                 return session_id
