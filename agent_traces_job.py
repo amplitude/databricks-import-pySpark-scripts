@@ -490,6 +490,30 @@ def _apply_session_selection(
     kept_sessions = kept_sessions.cache()
     sessions_kept = kept_sessions.count()
 
+    capped_watermark_upper: Optional[str] = None
+    if (
+        args.max_sessions is not None
+        and args.watermark_column
+        and sessions_sampled > sessions_kept
+    ):
+        kept_bounds = (
+            session_watermark.join(kept_sessions, _SESSION_KEY, "inner")
+            .agg(functions.max("__agent_session_watermark").alias("upper"))
+            .collect()
+        )
+        skipped_bounds = (
+            session_watermark.join(sampled_sessions, _SESSION_KEY, "inner")
+            .join(kept_sessions, _SESSION_KEY, "left_anti")
+            .agg(functions.min("__agent_session_watermark").alias("lower"))
+            .collect()
+        )
+        kept_upper = None if not kept_bounds else kept_bounds[0]["upper"]
+        skipped_lower = None if not skipped_bounds else skipped_bounds[0]["lower"]
+        capped_watermark_upper = _bound_capped_watermark(
+            None if kept_upper is None else str(kept_upper),
+            None if skipped_lower is None else str(skipped_lower),
+        )
+
     join_sessions = (
         functions.broadcast(kept_sessions)
         if args.max_sessions is not None
@@ -516,7 +540,7 @@ def _apply_session_selection(
     skipped = session_skip_counts(
         rows_before, rows_missing_session, rows_after_sampling, rows_after
     )
-    return selected, {
+    stats: Dict[str, Any] = {
         "session_id_column": session_column,
         "sessions_seen": sessions_seen,
         "sessions_sampled": sessions_sampled,
@@ -525,6 +549,13 @@ def _apply_session_selection(
         "rows_after_selection": rows_after,
         "skipped_by_reason": skipped,
     }
+    if capped_watermark_upper is not None or (
+        args.max_sessions is not None
+        and args.watermark_column
+        and sessions_sampled > sessions_kept
+    ):
+        stats["capped_watermark_upper"] = capped_watermark_upper
+    return selected, stats
 
 
 def _retry_after_seconds(headers: Any) -> Optional[float]:
@@ -874,6 +905,21 @@ def _sum_stats(partition_stats: Iterable[Mapping[str, Any]]) -> Dict[str, Any]:
     return totals
 
 
+def _bound_capped_watermark(
+    kept_session_watermark_upper: Optional[str],
+    skipped_session_watermark_lower: Optional[str],
+) -> Optional[str]:
+    """Bound watermark ack when a session cap defers later conversations."""
+    if (
+        kept_session_watermark_upper is None
+        or skipped_session_watermark_lower is None
+    ):
+        return None
+    if skipped_session_watermark_lower > kept_session_watermark_upper:
+        return kept_session_watermark_upper
+    return None
+
+
 def _watermark_payload(
     args: argparse.Namespace,
     *,
@@ -1015,6 +1061,8 @@ def run(
         data_frame, args, conversion_values
     )
     data_frame, selected_watermark_upper = _snapshot_watermark_upper(data_frame, args)
+    if "capped_watermark_upper" in session_stats:
+        selected_watermark_upper = session_stats["capped_watermark_upper"]
 
     api_key = None
     if not args.dry_run:

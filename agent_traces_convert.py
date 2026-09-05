@@ -622,7 +622,6 @@ def _mapped_otlp_span(event: Mapping[str, Any], config: ConversionConfig) -> Map
     trace_material = {
         "session": properties.get(_SESSION_ID),
         "user": event.get("user_id") or event.get("device_id"),
-        "event": event,
     }
     trace_id = _derived_hex(
         properties.get(_TRACE_ID),
