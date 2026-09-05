@@ -619,11 +619,14 @@ def _mapped_otlp_span(event: Mapping[str, Any], config: ConversionConfig) -> Map
     properties = dict(event.get("event_properties") or {})
     event_type = event["event_type"]
     time_millis = _http_v2_time(event.get("time"))
+    # Conversation-scoped material only: every row of a session has to derive
+    # the same traceId, otherwise parentSpanId points outside its own trace.
     trace_material = {
         "session": properties.get(_SESSION_ID),
         "user": event.get("user_id") or event.get("device_id"),
-        "event": event,
     }
+    if not any(trace_material.values()):
+        trace_material["event"] = event
     trace_id = _derived_hex(
         properties.get(_TRACE_ID),
         32,

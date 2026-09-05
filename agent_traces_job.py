@@ -281,6 +281,12 @@ def _apply_watermarks(data_frame: Any, args: argparse.Namespace) -> Any:
 _SESSION_HASH_HEX_DIGITS = 13
 _SESSION_HASH_SPACE = 16 ** _SESSION_HASH_HEX_DIGITS
 _SESSION_KEY = "__agent_session_id"
+_SESSION_WATERMARK = "__agent_session_watermark"
+
+
+def _column_extreme(data_frame: Any, aggregate: Any, column: str) -> Any:
+    rows = data_frame.agg(aggregate(column).alias("__agent_extreme")).collect()
+    return rows[0]["__agent_extreme"] if rows else None
 
 
 def _resolve_session_id_column(data_frame: Any, args: argparse.Namespace) -> Optional[str]:
@@ -408,6 +414,7 @@ def _unselected_session_stats(session_column: Optional[str]) -> Dict[str, Any]:
         "sessions_kept": None,
         "rows_before_selection": None,
         "rows_after_selection": None,
+        "excluded_watermark_lower": None,
         "skipped_by_reason": {},
     }
 
@@ -463,21 +470,46 @@ def _apply_session_selection(
     sampled_sessions = sampled_sessions.cache()
     sessions_sampled = sampled_sessions.count()
 
+    excluded_watermark_lower: Optional[str] = None
     if args.max_sessions is not None:
         if args.watermark_column:
             # Oldest conversations first so the acknowledged watermark can
             # advance through a capped window without skipping later sessions.
             session_watermark = with_session.groupBy(_SESSION_KEY).agg(
                 functions.min(functions.col(args.watermark_column)).alias(
-                    "__agent_session_watermark"
+                    _SESSION_WATERMARK
                 )
             )
-            kept_sessions = (
-                sampled_sessions.join(session_watermark, _SESSION_KEY, "inner")
-                .orderBy("__agent_session_watermark", _SESSION_KEY)
-                .limit(args.max_sessions)
-                .select(_SESSION_KEY)
+            sampled_watermarks = sampled_sessions.join(
+                session_watermark, _SESSION_KEY, "inner"
+            ).cache()
+            boundary = _column_extreme(
+                sampled_watermarks.orderBy(_SESSION_WATERMARK, _SESSION_KEY).limit(
+                    args.max_sessions
+                ),
+                functions.max,
+                _SESSION_WATERMARK,
             )
+            if boundary is None:
+                kept_sessions = sampled_sessions
+            else:
+                # Keep every conversation tied at the boundary watermark. A
+                # partial tie would leave excluded conversations sharing the
+                # last kept watermark, and no cursor value could then advance
+                # without skipping them.
+                boundary_value = functions.lit(boundary)
+                kept_sessions = sampled_watermarks.where(
+                    functions.col(_SESSION_WATERMARK) <= boundary_value
+                ).select(_SESSION_KEY)
+                excluded_lower = _column_extreme(
+                    sampled_watermarks.where(
+                        functions.col(_SESSION_WATERMARK) > boundary_value
+                    ),
+                    functions.min,
+                    _SESSION_WATERMARK,
+                )
+                if excluded_lower is not None:
+                    excluded_watermark_lower = str(excluded_lower)
         else:
             # Ordering by the full digest is a total order over distinct
             # conversation IDs, so the same conversations survive the cap on every
@@ -523,6 +555,7 @@ def _apply_session_selection(
         "sessions_kept": sessions_kept,
         "rows_before_selection": rows_before,
         "rows_after_selection": rows_after,
+        "excluded_watermark_lower": excluded_watermark_lower,
         "skipped_by_reason": skipped,
     }
 
@@ -892,6 +925,8 @@ def _watermark_payload(
     if args.dry_run:
         end_inclusive = None
     elif records_converted > 0:
+        # Already clamped below the earliest watermark the cap held back, so a
+        # kept conversation spanning later rows cannot advance past its peers.
         end_inclusive = selected_upper
     elif leftover:
         # Oldest capped conversations failed conversion. Hold the cursor so
@@ -916,8 +951,16 @@ def _watermark_payload(
 
 
 def _snapshot_watermark_upper(
-    data_frame: Any, args: argparse.Namespace
+    data_frame: Any,
+    args: argparse.Namespace,
+    below: Optional[str] = None,
 ) -> Tuple[Any, Optional[str]]:
+    """Return the frame plus its max watermark, optionally under an exclusive bound.
+
+    ``below`` carries the earliest watermark held back by the session cap. Rows
+    at or after it were never converted, so the acknowledged cursor has to stop
+    short of it.
+    """
     if not args.watermark_column:
         return data_frame, None
     if hasattr(data_frame, "cache"):
@@ -925,10 +968,13 @@ def _snapshot_watermark_upper(
     try:
         from pyspark.sql import functions
 
-        rows = data_frame.agg(
-            functions.max(functions.col(args.watermark_column)).alias("upper")
-        ).collect()
-        value = rows[0]["upper"] if rows else None
+        column = functions.col(args.watermark_column)
+        scoped = (
+            data_frame
+            if below is None
+            else data_frame.where(column < functions.lit(below))
+        )
+        value = _column_extreme(scoped, functions.max, args.watermark_column)
         return data_frame, None if value is None else str(value)
     except (AttributeError, TypeError):
         # Driver-only test doubles do not implement aggregate Spark actions.
@@ -1014,7 +1060,9 @@ def run(
     data_frame, session_stats = _apply_session_selection(
         data_frame, args, conversion_values
     )
-    data_frame, selected_watermark_upper = _snapshot_watermark_upper(data_frame, args)
+    data_frame, selected_watermark_upper = _snapshot_watermark_upper(
+        data_frame, args, below=session_stats.get("excluded_watermark_lower")
+    )
 
     api_key = None
     if not args.dry_run:

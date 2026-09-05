@@ -297,6 +297,28 @@ class MappedColumnsTests(unittest.TestCase):
         self.assertEqual("execute_tool", span_attributes(first)["gen_ai.operation.name"])
         self.assertIn("gen_ai.tool.call.arguments", span_attributes(first))
 
+    def test_rows_without_trace_id_share_the_conversation_trace(self):
+        first = dict(self.row, trace_id=None, span_id="b" * 16, agent_id="agent-1")
+        second = dict(
+            self.row,
+            trace_id=None,
+            span_id="c" * 16,
+            timestamp=1_735_689_601_000,
+            tool_input={"password": "other"},
+        )
+        first_span = otlp_span(convert_record(first, mapped_config())[0])
+        second_span = otlp_span(convert_record(second, mapped_config())[0])
+        self.assertEqual(first_span["traceId"], second_span["traceId"])
+        self.assertNotEqual(first_span["spanId"], second_span["spanId"])
+
+    def test_rows_in_different_conversations_get_distinct_traces(self):
+        first = dict(self.row, trace_id=None)
+        second = dict(self.row, trace_id=None, session_id="session-2")
+        self.assertNotEqual(
+            otlp_span(convert_record(first, mapped_config())[0])["traceId"],
+            otlp_span(convert_record(second, mapped_config())[0])["traceId"],
+        )
+
     def test_metadata_only_strips_content(self):
         record = convert_record(
             self.row, mapped_config(content_mode=ContentMode.METADATA_ONLY)
@@ -899,11 +921,62 @@ class _FakeDataFrame:
 
 
 class _FakeColumn:
+    def __init__(self, name=None):
+        self.name = name
+
     def __gt__(self, other):
         return ("gt", other)
 
     def __le__(self, other):
         return ("le", other)
+
+    def __lt__(self, other):
+        return ("lt", self.name, other)
+
+
+class _FakeAggregation:
+    def __init__(self, kind, column):
+        self.kind = kind
+        self.column = column
+        self.output = column
+
+    def alias(self, name):
+        self.output = name
+        return self
+
+
+class _FakeAggregated:
+    def __init__(self, name, value):
+        self.name = name
+        self.value = value
+
+    def collect(self):
+        return [{self.name: self.value}]
+
+
+class _WatermarkFrame:
+    """Driver-side stand-in for the aggregate path of the snapshot helper."""
+
+    def __init__(self, values, column):
+        self.values = list(values)
+        self.column = column
+
+    def cache(self):
+        return self
+
+    def where(self, condition):
+        kind, column, literal = condition
+        assert kind == "lt" and column == self.column
+        bound = literal.value if isinstance(literal, _FakeLiteral) else literal
+        return _WatermarkFrame([v for v in self.values if v < bound], self.column)
+
+    def agg(self, aggregation):
+        present = [value for value in self.values if value is not None]
+        if not present:
+            chosen = None
+        else:
+            chosen = max(present) if aggregation.kind == "max" else min(present)
+        return _FakeAggregated(aggregation.output, chosen)
 
 
 class _FakeLiteral:
@@ -917,8 +990,10 @@ class _FakeLiteral:
 def fake_pyspark_modules():
     """Minimal pyspark.sql.functions stand-in for driver-only code paths."""
     functions = types.ModuleType("pyspark.sql.functions")
-    functions.col = lambda name: _FakeColumn()
+    functions.col = _FakeColumn
     functions.lit = _FakeLiteral
+    functions.max = lambda column: _FakeAggregation("max", column)
+    functions.min = lambda column: _FakeAggregation("min", column)
     sql = types.ModuleType("pyspark.sql")
     sql.functions = functions
     root = types.ModuleType("pyspark")
@@ -995,6 +1070,39 @@ class JobOptionsTests(unittest.TestCase):
         self.assertIsNone(payload["end_inclusive"])
         self.assertFalse(payload["advanced"])
         self.assertEqual("2026-03-01", payload["snapshot_upper"])
+
+    def test_snapshot_stops_short_of_the_earliest_capped_session(self):
+        frame = _WatermarkFrame(
+            ["2026-01-01", "2026-01-05", "2026-01-20"], "updated_at"
+        )
+        args = types.SimpleNamespace(watermark_column="updated_at", watermark_end=None)
+        with unittest.mock.patch.dict(sys.modules, fake_pyspark_modules()):
+            _, upper = agent_traces_job._snapshot_watermark_upper(
+                frame, args, below="2026-01-10"
+            )
+            _, unbounded = agent_traces_job._snapshot_watermark_upper(frame, args)
+        # A kept conversation running to 2026-01-20 must not acknowledge past
+        # the 2026-01-10 session the cap held back.
+        self.assertEqual("2026-01-05", upper)
+        self.assertEqual("2026-01-20", unbounded)
+
+    def test_watermark_holds_when_every_kept_row_is_at_the_capped_bound(self):
+        args = types.SimpleNamespace(
+            dry_run=False,
+            watermark_column="updated_at",
+            watermark_start="2026-01-01",
+            max_sessions=2,
+        )
+        payload = agent_traces_job._watermark_payload(
+            args,
+            source_upper="2026-03-01",
+            selected_upper=None,
+            records_converted=4,
+            sessions_sampled=10,
+            sessions_kept=2,
+        )
+        self.assertIsNone(payload["end_inclusive"])
+        self.assertFalse(payload["advanced"])
 
     def test_watermark_advances_selected_window_after_partial_cap(self):
         args = types.SimpleNamespace(
