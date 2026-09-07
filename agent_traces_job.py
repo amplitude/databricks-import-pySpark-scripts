@@ -489,8 +489,14 @@ def _apply_session_selection(
                     _SESSION_WATERMARK
                 )
             )
+            # Null watermarks cannot participate in incremental capping: Spark
+            # orders them first, which lets them consume cap slots and can
+            # bypass the limit when every selected watermark is null.
+            watermarked_sessions = session_watermark.where(
+                functions.col(_SESSION_WATERMARK).isNotNull()
+            )
             sampled_watermarks = sampled_sessions.join(
-                session_watermark, _SESSION_KEY, "inner"
+                watermarked_sessions, _SESSION_KEY, "inner"
             ).cache()
             boundary = _column_extreme(
                 sampled_watermarks.orderBy(_SESSION_WATERMARK, _SESSION_KEY).limit(
@@ -500,7 +506,7 @@ def _apply_session_selection(
                 _SESSION_WATERMARK,
             )
             if boundary is None:
-                kept_sessions = sampled_sessions
+                kept_sessions = sampled_sessions.limit(0)
             else:
                 # Keep every conversation tied at the boundary watermark. A
                 # partial tie would leave excluded conversations sharing the
@@ -766,6 +772,17 @@ def _record_previews(
         "gen_ai.output.messages": "output",
         "gen_ai.tool.call.arguments": "input",
         "gen_ai.tool.call.result": "output",
+        "gen_ai.request.model": "model",
+        "gen_ai.response.model": "model",
+        "gen_ai.usage.input_tokens": "usage",
+        "gen_ai.usage.output_tokens": "usage",
+        "gen_ai.usage.reasoning.output_tokens": "usage",
+        "gen_ai.usage.cache_read.input_tokens": "usage",
+        "gen_ai.usage.cache_creation.input_tokens": "usage",
+        "gen_ai.usage.cost": "usage",
+        "gen_ai.response.finish_reason": "usage",
+        "gen_ai.response.finish_reasons": "usage",
+        "gen_ai.output.value": "usage",
     }
     for resource in record.payload.get("resourceSpans", []):
         for scope in resource.get("scopeSpans", []):
@@ -781,6 +798,10 @@ def _record_previews(
                         preview[label] = _redact_content(
                             decoded, True, conversion.custom_redaction_patterns
                         )
+                status = span.get("status") or {}
+                code = status.get("code")
+                if code in (2, "2", "STATUS_CODE_ERROR", "ERROR"):
+                    preview["error"] = True
                 if preview:
                     previews.append(preview)
     return previews

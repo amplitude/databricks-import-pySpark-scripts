@@ -1692,6 +1692,45 @@ class DryRunTests(unittest.TestCase):
         self.assertEqual("dry_run", result["status"])
 
 
+class PreviewTests(unittest.TestCase):
+    def test_record_previews_marks_error_status(self):
+        record = ConvertedRecord(
+            protocol=Protocol.OTLP_JSON,
+            payload={
+                "resourceSpans": [
+                    {
+                        "scopeSpans": [
+                            {
+                                "spans": [
+                                    {
+                                        "attributes": [
+                                            {
+                                                "key": "gen_ai.operation.name",
+                                                "value": {"stringValue": "chat"},
+                                            },
+                                            {
+                                                "key": "gen_ai.input.messages",
+                                                "value": {"stringValue": "hello"},
+                                            },
+                                        ],
+                                        "status": {"code": "STATUS_CODE_ERROR"},
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            },
+            stable_key="preview",
+        )
+        previews = agent_traces_job._record_previews(
+            record, ConversionConfig(content_mode=ContentMode.FULL)
+        )
+        self.assertEqual(
+            [{"operation": "chat", "input": "hello", "error": True}], previews
+        )
+
+
 class DeliveryEncodingTests(unittest.TestCase):
     def test_retry_after_is_capped(self):
         self.assertEqual(
