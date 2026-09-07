@@ -627,18 +627,20 @@ def _mapped_otlp_span(event: Mapping[str, Any], config: ConversionConfig) -> Map
     # Conversation-scoped material only: every row of a session has to derive
     # the same traceId, otherwise parentSpanId points outside its own trace.
     trace_material = {
-        "session": properties.get(_SESSION_ID),
+        "session": _canonical_session_value(properties.get(_SESSION_ID)),
         "user": event.get("user_id") or event.get("device_id"),
     }
     if not any(trace_material.values()):
         trace_material["event"] = event
+    trace_id_value = properties.get(_TRACE_ID)
+    span_id_value = properties.get(_SPAN_ID)
     trace_id = _derived_hex(
-        properties.get(_TRACE_ID),
+        trace_id_value,
         32,
-        properties.get(_TRACE_ID) or trace_material,
+        _canonical_session_value(trace_id_value) or trace_material,
     )
     span_id = _derived_hex(
-        properties.get(_SPAN_ID), 16, properties.get(_SPAN_ID) or event
+        span_id_value, 16, _canonical_session_value(span_id_value) or event
     )
     operation = {
         _USER_MESSAGE: "chat",
