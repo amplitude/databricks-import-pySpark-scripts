@@ -12,6 +12,7 @@ from agent_traces_convert import (
     ContentMode,
     ConversionConfig,
     ConversionError,
+    ConvertedRecord,
     Protocol,
     SourceFormat,
     _http_v2_time,
@@ -1724,7 +1725,10 @@ class PreviewTests(unittest.TestCase):
             stable_key="preview",
         )
         previews = agent_traces_job._record_previews(
-            record, ConversionConfig(content_mode=ContentMode.FULL)
+            record,
+            ConversionConfig(
+                source_format=SourceFormat.MLFLOW_UC, content_mode=ContentMode.FULL
+            ),
         )
         self.assertEqual(
             [{"operation": "chat", "input": "hello", "error": True}], previews
