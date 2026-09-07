@@ -153,6 +153,17 @@ class MlflowSessionExportTests(unittest.TestCase):
             {"stringValue": "session-row"}, self._session_attribute(row)
         )
 
+    def test_whitespace_session_falls_through_to_real_alias(self):
+        row = dict(
+            self.row,
+            tags={"session_id": "   ", "conversation_id": "session-real"},
+        )
+        config = ConversionConfig(source_format=SourceFormat.MLFLOW_UC)
+        self.assertEqual("session-real", canonical_session_id(row, config))
+        self.assertEqual(
+            {"stringValue": "session-real"}, self._session_attribute(row)
+        )
+
     def test_official_mlflow_tag_is_exported(self):
         row = dict(self.row, tags={"mlflow.trace.session": "session-tag"})
         config = ConversionConfig(source_format=SourceFormat.MLFLOW_UC)
@@ -257,6 +268,11 @@ class SpecialFloatTests(unittest.TestCase):
     def test_epoch_seconds_are_coerced_to_millis(self):
         self.assertEqual(1_735_689_600_000, _http_v2_time(1_735_689_600))
         self.assertEqual(1_735_689_600_000, _http_v2_time("1735689600"))
+        self.assertEqual(1_735_689_600_000, _http_v2_time("1735689600.0"))
+        self.assertEqual(1_735_689_600_000, _http_v2_time("1.7356896e9"))
+
+    def test_padded_hex_ids_are_accepted(self):
+        self.assertEqual("ab" * 16, _to_hex_id("  " + "ab" * 16 + "  ", 16, "trace_id"))
 
 
 class SpanKindTests(unittest.TestCase):

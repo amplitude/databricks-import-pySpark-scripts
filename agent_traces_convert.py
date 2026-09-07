@@ -747,6 +747,12 @@ def _convert_mapped(row: Mapping[str, Any], config: ConversionConfig) -> List[Co
     user_id = _column_override(row, config.user_id_column)
     if user_id is not None:
         event["user_id"] = user_id
+    for key in ("user_id", "device_id"):
+        canonical = _canonical_session_value(event.get(key))
+        if canonical is None:
+            event.pop(key, None)
+        else:
+            event[key] = canonical
     if isinstance(properties, dict) and _canonical_session_value(
         properties.get(_SESSION_ID)
     ) is None:
@@ -857,6 +863,12 @@ def _http_v2_time(value: Any, field_name: str = "time") -> int:
     if re.match(r"^-?\d+$", text):
         return _http_v2_time(int(text), field_name)
     try:
+        numeric = float(text)
+    except ValueError:
+        numeric = None
+    if numeric is not None and math.isfinite(numeric):
+        return _http_v2_time(numeric, field_name)
+    try:
         parsed = dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
         raise ConversionError(
@@ -909,6 +921,12 @@ def _unix_nanos(value: Any, field_name: str) -> str:
         elif magnitude < 100_000_000_000_000_000:
             numeric *= 1_000
         return str(numeric)
+    try:
+        numeric = float(text)
+    except ValueError:
+        numeric = None
+    if numeric is not None and math.isfinite(numeric):
+        return _unix_nanos(numeric, field_name)
     try:
         parsed = dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
