@@ -873,6 +873,11 @@ def _unix_nanos(value: Any, field_name: str) -> str:
         raise ConversionError(
             "{} is required".format(field_name), reason="invalid_timestamp"
         )
+    if isinstance(value, bool):
+        raise ConversionError(
+            "{} is not a timestamp: {!r}".format(field_name, value),
+            reason="invalid_timestamp",
+        )
     if isinstance(value, dt.datetime):
         if value.tzinfo is None:
             value = value.replace(tzinfo=dt.timezone.utc)
