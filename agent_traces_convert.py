@@ -1492,9 +1492,6 @@ def canonical_session_id(
         override = _column_override(row, config.session_id_column)
         if override is not None:
             return override
-        from_row = _mlflow_session_value(row, {}, {})
-        if from_row is not None:
-            return from_row
         metadata, tags = _mlflow_containers(row)
         return _mlflow_session_value(row, metadata, tags)
     return None
