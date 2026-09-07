@@ -1441,6 +1441,10 @@ def _column_override(row: Mapping[str, Any], column: Optional[str]) -> Optional[
 
 
 def _mapped_duration_nanos(latency_ms: Any) -> int:
+    # Warehouse string columns spell "no latency" as a blank cell, which is the
+    # same signal as a missing or null column rather than a malformed row.
+    if latency_ms is None or (isinstance(latency_ms, str) and not latency_ms.strip()):
+        latency_ms = 0
     try:
         millis = float(latency_ms)
     except (TypeError, ValueError):

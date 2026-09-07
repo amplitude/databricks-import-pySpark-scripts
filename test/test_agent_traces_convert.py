@@ -516,6 +516,18 @@ class MappedColumnsTests(unittest.TestCase):
             convert_record(row, mapped_config(mapping=mapping))
         self.assertEqual("invalid_record", ctx.exception.reason)
 
+    def test_blank_latency_is_treated_as_absent(self):
+        mapping = dict(MAPPING)
+        mapping["event_properties"] = dict(
+            MAPPING["event_properties"],
+            **{"[Agent] Latency Ms": "$.latency_ms"},
+        )
+        row = dict(self.row, latency_ms="   ")
+        span = otlp_span(convert_record(row, mapped_config(mapping=mapping))[0])
+        self.assertEqual(
+            int(span["endTimeUnixNano"]) - 1, int(span["startTimeUnixNano"])
+        )
+
     def test_infinite_latency_is_an_invalid_record(self):
         mapping = dict(MAPPING)
         mapping["event_properties"] = dict(
