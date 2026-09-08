@@ -5,8 +5,10 @@ Python scripts that import data from Databricks.
 
 `agent_traces_job.py` reads warehouse rows with Spark and sends converted agent
 events directly to Amplitude as OTLP/JSON `ExportTraceServiceRequest` payloads
-at `/v1/traces`. Authentication uses `Authorization: Bearer <key>`; HTTP V2 is
-not a supported delivery mode. It supports exactly two source shapes:
+at `https://api.amplitude.com/otlp/v1/traces` (US) or
+`https://api.eu.amplitude.com/otlp/v1/traces` (EU). Authentication uses
+`Authorization: Bearer <key>`; HTTP V2 is not a supported delivery mode. It
+supports exactly two source shapes:
 
 - `mapped-columns`: the existing HTTP V2-shaped `[Agent] ...` mapping remains
   accepted, but each mapped row is translated to one receiver-compatible OTLP

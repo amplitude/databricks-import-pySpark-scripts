@@ -302,6 +302,9 @@ def normalize(value: Any) -> Any:
     ``spark.sql.session.timeZone`` to UTC so ``Row.asDict()`` renders them that
     way regardless of cluster locale.
     """
+    to_python = getattr(value, "toPython", None)
+    if callable(to_python):
+        return normalize(to_python())
     if hasattr(value, "asDict"):
         value = value.asDict(recursive=True)
     if isinstance(value, Mapping):
@@ -670,9 +673,9 @@ def _mapped_otlp_span(event: Mapping[str, Any], config: ConversionConfig) -> Map
         if properties.get(source) is not None:
             attrs[target] = properties[source]
     _apply_session_attributes(attrs, properties.get(_SESSION_ID))
-    identity = event.get("user_id") or event.get("device_id")
-    if identity is not None:
-        attrs["enduser.id"] = identity
+    user_id = event.get("user_id")
+    if user_id is not None:
+        attrs["enduser.id"] = user_id
     message = _agent_message_text(properties.get("$llm_message"))
     if message is not None:
         if event_type == _USER_MESSAGE:
@@ -1334,8 +1337,58 @@ def _mlflow_containers(row: Mapping[str, Any]) -> Tuple[Any, Any]:
     return metadata, tags
 
 
+def _mlflow_user_id(
+    row: Mapping[str, Any],
+    config: ConversionConfig,
+    required: bool,
+) -> Optional[str]:
+    """Return an explicit MLflow user identity, never a device or trace ID."""
+    user_id = _column_override(row, config.user_id_column)
+    if user_id is None:
+        metadata, tags = _mlflow_containers(row)
+        for key in ("enduser.id", "user_id", "userId", "mlflow.trace.user"):
+            for container in (metadata, tags):
+                if isinstance(container, Mapping):
+                    user_id = _canonical_session_value(container.get(key))
+                    if user_id is not None:
+                        break
+            if user_id is not None:
+                break
+    if user_id is None and required:
+        raise ConversionError(
+            "mlflow-uc strict essentials require user identity in trace_metadata or tags "
+            "(enduser.id, user_id, or userId)",
+            reason="missing_identity",
+        )
+    return user_id
+
+
+def _mlflow_service_name(
+    row: Mapping[str, Any], span: Optional[Mapping[str, Any]]
+) -> str:
+    service_name = _canonical_session_value(row.get("service_name"))
+    if service_name is not None:
+        return service_name
+    if isinstance(span, Mapping):
+        service_name = _canonical_session_value(
+            _first_present(span, "service_name", "serviceName")
+        )
+        if service_name is not None:
+            return service_name
+        scope = _first_present(
+            span, "instrumentation_scope", "instrumentationScope"
+        )
+        if isinstance(scope, Mapping):
+            service_name = _canonical_session_value(scope.get("name"))
+            if service_name is not None:
+                return service_name
+    return "mlflow-unity-catalog"
+
+
 def _resource_attributes(
-    row: Mapping[str, Any], config: ConversionConfig
+    row: Mapping[str, Any],
+    config: ConversionConfig,
+    span: Optional[Mapping[str, Any]] = None,
 ) -> List[Mapping[str, Any]]:
     metadata, tags = _mlflow_containers(row)
     attributes: Dict[str, Any] = {}
@@ -1346,22 +1399,10 @@ def _resource_attributes(
     session_id = _canonical_session_value(row.get(config.session_id_column)) if config.session_id_column else None
     session_id = session_id or _mlflow_session_value(row, metadata, tags)
     _apply_session_attributes(attributes, session_id)
-    user_id = _canonical_session_value(row.get(config.user_id_column)) if config.user_id_column else None
-    if user_id is None:
-        for container in (row, metadata, tags):
-            if isinstance(container, Mapping):
-                for key in ("user_id", "userId", "enduser.id", "mlflow.trace.user"):
-                    user_id = _canonical_session_value(container.get(key))
-                    if user_id is not None:
-                        break
-            if user_id is not None:
-                break
+    user_id = _mlflow_user_id(row, config, False)
     if user_id is not None:
         attributes["enduser.id"] = user_id
-    attributes.setdefault(
-        "service.name",
-        _first_present(row, "service_name", default="mlflow-unity-catalog"),
-    )
+    attributes.setdefault("service.name", _mlflow_service_name(row, span))
     if config.content_mode == ContentMode.FULL:
         if row.get("request") is not None:
             attributes["mlflow.trace.request"] = row.get("request")
@@ -1388,7 +1429,7 @@ def _convert_mlflow(row: Mapping[str, Any], config: ConversionConfig) -> List[Co
     ]
     if len(converted_spans) != len(spans):
         raise ConversionError("every spans entry must be an object")
-    resource_attributes = _resource_attributes(row, config)
+    resource_attributes = _resource_attributes(row, config, spans[0])
     if not any(
         item.get("key") in _RECEIVER_SESSION_KEYS for item in resource_attributes
     ):
@@ -1396,8 +1437,10 @@ def _convert_mlflow(row: Mapping[str, Any], config: ConversionConfig) -> List[Co
             "mlflow-uc record requires a session/conversation identifier",
             reason="missing_session_id",
         )
+    _mlflow_user_id(row, config, config.strict_essentials)
     records = []
     for index, converted_span in enumerate(converted_spans):
+        resource_attributes = _resource_attributes(row, config, spans[index])
         payload = {
             "resourceSpans": [
                 {

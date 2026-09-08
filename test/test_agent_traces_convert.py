@@ -113,11 +113,33 @@ class JsonPathTests(unittest.TestCase):
 
 
 class SparkValueTests(unittest.TestCase):
+    class VariantValue:
+        def __init__(self, value):
+            self.value = value
+
+        def toPython(self):
+            return self.value
+
     def test_bytearray_normalizes_and_hex_ids(self):
         payload = bytearray.fromhex("ab" * 16)
         self.assertEqual("ab" * 16, normalize(payload))
         self.assertEqual("ab" * 16, _to_hex_id(payload, 16, "trace_id"))
         self.assertEqual("ab" * 16, _to_hex_id(bytes(payload), 16, "trace_id"))
+
+    def test_variant_values_normalize_dicts_and_lists_recursively(self):
+        value = self.VariantValue(
+            {
+                "metadata": self.VariantValue({"session_id": "session-1"}),
+                "spans": self.VariantValue([{"name": "predict"}]),
+            }
+        )
+        self.assertEqual(
+            {
+                "metadata": {"session_id": "session-1"},
+                "spans": [{"name": "predict"}],
+            },
+            normalize(value),
+        )
 
 
 class MlflowSessionExportTests(unittest.TestCase):
@@ -138,7 +160,10 @@ class MlflowSessionExportTests(unittest.TestCase):
         }
 
     def _session_attribute(self, row):
-        config = ConversionConfig(source_format=SourceFormat.MLFLOW_UC)
+        config = ConversionConfig(
+            source_format=SourceFormat.MLFLOW_UC,
+            strict_essentials=False,
+        )
         resource = convert_record(row, config)[0].payload["resourceSpans"][0]
         attributes = {
             item["key"]: item["value"] for item in resource["resource"]["attributes"]
@@ -508,6 +533,27 @@ class MappedColumnsTests(unittest.TestCase):
         self.assertEqual("mapped-s", span_attributes(record)["gen_ai.conversation.id"])
         self.assertEqual("user-1", span_attributes(record)["enduser.id"])
 
+    def test_only_user_id_maps_to_enduser_id(self):
+        mapping = dict(MAPPING)
+        mapping["device_id"] = "$.identity.device"
+        cases = (
+            ({"user": "user-1"}, "user-1"),
+            ({"device": "device-1"}, None),
+            ({"user": "user-1", "device": "device-1"}, "user-1"),
+        )
+        for identity, expected in cases:
+            with self.subTest(identity=identity):
+                attrs = span_attributes(
+                    convert_record(
+                        dict(self.row, identity=identity),
+                        mapped_config(mapping=mapping),
+                    )[0]
+                )
+                if expected is None:
+                    self.assertNotIn("enduser.id", attrs)
+                else:
+                    self.assertEqual(expected, attrs["enduser.id"])
+
     def test_mapped_session_ids_are_canonicalized(self):
         mapping = dict(MAPPING)
         mapping["event_properties"] = dict(
@@ -711,7 +757,13 @@ class MlflowUcTests(unittest.TestCase):
             "trace_id": "01" * 16,
             "request": {"messages": [{"content": "private"}]},
             "response": {"content": "also private"},
-            "trace_metadata": json.dumps({"experiment": "exp-1", "session_id": "session-1"}),
+            "trace_metadata": json.dumps(
+                {
+                    "experiment": "exp-1",
+                    "session_id": "session-1",
+                    "enduser.id": "user-1",
+                }
+            ),
             "tags": {"team": "ai"},
             "spans": [
                 {
@@ -766,6 +818,18 @@ class MlflowUcTests(unittest.TestCase):
         self.assertEqual(str(_unix_nanos(end, "span end time")), span["endTimeUnixNano"])
         self.assertEqual(1, span["status"]["code"])
 
+    def test_variant_json_containers_convert(self):
+        row = dict(self.row)
+        row["trace_metadata"] = SparkValueTests.VariantValue(
+            {"session_id": "session-1", "enduser.id": "user-1"}
+        )
+        row["spans"] = SparkValueTests.VariantValue(self.row["spans"])
+        self.assertTrue(
+            convert_record(
+                row, ConversionConfig(source_format=SourceFormat.MLFLOW_UC)
+            )
+        )
+
     def test_builds_otlp_json_and_strips_content(self):
         config = ConversionConfig(
             source_format=SourceFormat.MLFLOW_UC,
@@ -795,6 +859,60 @@ class MlflowUcTests(unittest.TestCase):
         keys = {item["key"] for item in resource["resource"]["attributes"]}
         self.assertIn("mlflow.trace.request", keys)
         self.assertIn("mlflow.trace.response", keys)
+
+    def test_service_name_falls_back_through_span_and_scope(self):
+        cases = (
+            ({"service_name": "span-service"}, "span-service"),
+            (
+                {"instrumentation_scope": {"name": "scope-service"}},
+                "scope-service",
+            ),
+        )
+        for fields, expected in cases:
+            with self.subTest(fields=fields):
+                row = dict(self.row)
+                row["spans"] = [dict(self.row["spans"][0], **fields)]
+                resource = convert_record(
+                    row, ConversionConfig(source_format=SourceFormat.MLFLOW_UC)
+                )[0].payload["resourceSpans"][0]
+                attrs = {
+                    item["key"]: decode_any(item["value"])
+                    for item in resource["resource"]["attributes"]
+                }
+                self.assertEqual(expected, attrs["service.name"])
+
+    def test_row_service_name_precedes_span_service_name(self):
+        row = dict(self.row, service_name="row-service")
+        row["spans"] = [
+            dict(self.row["spans"][0], service_name="span-service")
+        ]
+        resource = convert_record(
+            row, ConversionConfig(source_format=SourceFormat.MLFLOW_UC)
+        )[0].payload["resourceSpans"][0]
+        attrs = {
+            item["key"]: decode_any(item["value"])
+            for item in resource["resource"]["attributes"]
+        }
+        self.assertEqual("row-service", attrs["service.name"])
+
+    def test_strict_essentials_requires_mlflow_user_identity(self):
+        row = dict(
+            self.row,
+            trace_metadata={"session_id": "session-1"},
+            tags={"team": "ai"},
+        )
+        with self.assertRaises(ConversionError) as ctx:
+            convert_record(row, ConversionConfig(source_format=SourceFormat.MLFLOW_UC))
+        self.assertEqual("missing_identity", ctx.exception.reason)
+        self.assertTrue(
+            convert_record(
+                row,
+                ConversionConfig(
+                    source_format=SourceFormat.MLFLOW_UC,
+                    strict_essentials=False,
+                ),
+            )
+        )
 
     def test_full_mode_redacts_mlflow_content_recursively(self):
         row = dict(
@@ -850,7 +968,10 @@ class MlflowUcTests(unittest.TestCase):
 
     def test_corrupt_metadata_json_keeps_the_row(self):
         row = dict(self.row, trace_metadata="{not json", tags="also not json")
-        config = ConversionConfig(source_format=SourceFormat.MLFLOW_UC)
+        config = ConversionConfig(
+            source_format=SourceFormat.MLFLOW_UC,
+            strict_essentials=False,
+        )
         # canonical_session_id already tolerates this, so convert must too or the
         # job groups the conversation and then drops every row in it.
         row["trace_metadata"] = "{not json"
@@ -1563,7 +1684,12 @@ class JobOptionsTests(unittest.TestCase):
         record = convert_record(case.row, mapped_config())[0]
         config = agent_traces_job.DeliveryConfig(**dict(delivery, api_key="secret"))
         url, body, headers = _request_parts(Protocol.OTLP_JSON, [record], config)
-        self.assertTrue(url.endswith("/v1/traces"))
+        self.assertEqual("https://api.amplitude.com/otlp/v1/traces", url)
+        eu_config = agent_traces_job.DeliveryConfig(
+            **dict(delivery, api_key="secret", server_zone="EU")
+        )
+        eu_url, _, _ = _request_parts(Protocol.OTLP_JSON, [record], eu_config)
+        self.assertEqual("https://api.eu.amplitude.com/otlp/v1/traces", eu_url)
         self.assertEqual({"Authorization": "Bearer secret"}, headers)
         self.assertNotIn("api_key", body)
 

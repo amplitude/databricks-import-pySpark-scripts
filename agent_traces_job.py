@@ -34,8 +34,8 @@ from agent_traces_convert import (
 
 
 OTLP_ENDPOINTS = {
-    "US": "https://api2.amplitude.com/v1/traces",
-    "EU": "https://api.eu.amplitude.com/v1/traces",
+    "US": "https://api.amplitude.com/otlp/v1/traces",
+    "EU": "https://api.eu.amplitude.com/otlp/v1/traces",
 }
 RESULT_PREFIX = "AGENT_TRACES_JOB_RESULT="
 MAX_MAPPING_BYTES = 1_048_576
