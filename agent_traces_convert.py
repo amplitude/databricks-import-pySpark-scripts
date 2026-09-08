@@ -524,6 +524,14 @@ def _resolve(spec: Any, row: Mapping[str, Any]) -> Any:
     return normalize(spec)
 
 
+def _mapped_session_value(mapping: Mapping[str, Any], row: Mapping[str, Any]) -> Any:
+    """Resolve only the configured session mapping used for row grouping."""
+    properties = mapping.get("event_properties")
+    if not isinstance(properties, Mapping) or _SESSION_ID not in properties:
+        return None
+    return _resolve(properties[_SESSION_ID], row)
+
+
 def _drop_none(value: Any) -> Any:
     if isinstance(value, Mapping):
         return {
@@ -613,14 +621,14 @@ def _is_error_flag(value: Any) -> bool:
 
 
 def _derived_hex(value: Any, length: int, material: Any) -> str:
-    text = str(value or "").strip().replace("-", "").lower()
+    text = (_canonical_session_value(value) or "").replace("-", "").lower()
     if len(text) == length and re.match(r"^[0-9a-f]+$", text):
         return text
     if not isinstance(material, (Mapping, list, tuple)):
         # Warehouse columns type the same ID differently (an integer span_id
         # against a string parent_span_id), so hash the text form or the two
         # sides would never agree and parent links would break.
-        material = str(material).strip()
+        material = _canonical_session_value(material)
     return hashlib.sha256(canonical_json(material).encode("utf-8")).hexdigest()[:length]
 
 
@@ -759,15 +767,20 @@ def _convert_mapped(row: Mapping[str, Any], config: ConversionConfig) -> List[Co
     user_id = _column_override(row, config.user_id_column)
     if user_id is not None:
         event["user_id"] = user_id
+    if isinstance(properties, dict):
+        for key in (_SESSION_ID, _TRACE_ID, _SPAN_ID, "[Agent] Parent Span ID"):
+            canonical = _canonical_session_value(properties.get(key))
+            if canonical is None:
+                properties.pop(key, None)
+            else:
+                properties[key] = canonical
     for key in ("user_id", "device_id"):
         canonical = _canonical_session_value(event.get(key))
         if canonical is None:
             event.pop(key, None)
         else:
             event[key] = canonical
-    if isinstance(properties, dict) and _canonical_session_value(
-        properties.get(_SESSION_ID)
-    ) is None:
+    if isinstance(properties, dict) and properties.get(_SESSION_ID) is None:
         raise ConversionError(
             "mapped event requires {!r}".format(_SESSION_ID),
             reason="missing_session_id",
@@ -1285,7 +1298,11 @@ def _convert_span(
                         "name": str(event.get("name", "")),
                         "timeUnixNano": _unix_nanos(
                             _first_present(
-                                event, "time_unix_nano", "timeUnixNano", "time"
+                                event,
+                                "time_unix_nano",
+                                "timeUnixNano",
+                                "time",
+                                "timestamp",
                             ),
                             "event time",
                         ),
@@ -1500,6 +1517,12 @@ def convert_record(
 def _canonical_session_value(value: Any) -> Optional[str]:
     if value is None or isinstance(value, (Mapping, list, tuple)):
         return None
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return None
+        if value.is_integer():
+            return str(int(value))
+        return repr(value)
     text = str(value).strip()
     return text or None
 
@@ -1551,13 +1574,7 @@ def canonical_session_id(
             return override
         if not config.mapping:
             return None
-        event = _drop_none(_resolve(config.mapping, row))
-        if not isinstance(event, Mapping):
-            return None
-        properties = event.get("event_properties")
-        if not isinstance(properties, Mapping):
-            return None
-        return _canonical_session_value(properties.get(_SESSION_ID))
+        return _canonical_session_value(_mapped_session_value(config.mapping, row))
     if config.source_format == SourceFormat.MLFLOW_UC:
         override = _column_override(row, config.session_id_column)
         if override is not None:

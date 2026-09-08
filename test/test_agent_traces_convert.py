@@ -367,13 +367,23 @@ class MappedColumnsTests(unittest.TestCase):
             **{"[Agent] Parent Span ID": "$.parent_span_id"},
         )
         config = mapped_config(mapping=mapping)
-        parent = convert_record(dict(self.row, span_id=90210), config)[0]
+        parent = convert_record(dict(self.row, span_id=90210.0), config)[0]
         child = convert_record(
             dict(self.row, span_id="c" * 16, parent_span_id="90210"), config
         )[0]
         self.assertEqual(
             otlp_span(parent)["spanId"], otlp_span(child)["parentSpanId"]
         )
+
+    def test_integral_float_trace_ids_hash_like_integer_strings(self):
+        config = mapped_config()
+        float_span = otlp_span(
+            convert_record(dict(self.row, trace_id=12345.0), config)[0]
+        )
+        string_span = otlp_span(
+            convert_record(dict(self.row, trace_id="12345"), config)[0]
+        )
+        self.assertEqual(float_span["traceId"], string_span["traceId"])
 
     def test_rows_in_different_conversations_get_distinct_traces(self):
         first = dict(self.row, trace_id=None)
@@ -573,6 +583,32 @@ class MappedColumnsTests(unittest.TestCase):
         attrs = span_attributes(convert_record(row, config)[0])
         self.assertEqual("123", attrs["gen_ai.conversation.id"])
         self.assertEqual("123", attrs["amplitude.session_id"])
+
+    def test_integral_float_sessions_match_integer_and_string_sessions(self):
+        config = mapped_config()
+        expected = canonical_session_id(dict(self.row, session_id=12345), config)
+        self.assertEqual("12345", expected)
+        self.assertEqual(
+            expected, canonical_session_id(dict(self.row, session_id=12345.0), config)
+        )
+        self.assertEqual(
+            expected, canonical_session_id(dict(self.row, session_id="12345"), config)
+        )
+        self.assertEqual(
+            "12345.25",
+            canonical_session_id(dict(self.row, session_id=12345.25), config),
+        )
+        self.assertIsNone(
+            canonical_session_id(dict(self.row, session_id=float("inf")), config)
+        )
+
+    def test_session_grouping_resolves_only_session_mapping(self):
+        mapping = dict(MAPPING)
+        mapping["event_type"] = {"$path": "$.missing_type", "required": True}
+        config = mapped_config(mapping=mapping)
+        self.assertEqual("session-1", canonical_session_id(self.row, config))
+        with self.assertRaisesRegex(ConversionError, "required mapping path"):
+            convert_record(self.row, config)
 
     def test_non_numeric_latency_is_an_invalid_record(self):
         mapping = dict(MAPPING)
@@ -824,6 +860,28 @@ class MlflowUcTests(unittest.TestCase):
         self.assertEqual(str(_unix_nanos(start, "span start time")), span["startTimeUnixNano"])
         self.assertEqual(str(_unix_nanos(end, "span end time")), span["endTimeUnixNano"])
         self.assertEqual(1, span["status"]["code"])
+
+    def test_span_event_timestamp_field_is_converted(self):
+        event_time = dt.datetime(2026, 1, 1, 0, 0, 0, 500000, tzinfo=dt.timezone.utc)
+        row = dict(self.row)
+        row["spans"] = [
+            dict(
+                self.row["spans"][0],
+                events=[
+                    {
+                        "name": "exception",
+                        "timestamp": event_time,
+                        "attributes": {"exception.type": "ValueError"},
+                    }
+                ],
+            )
+        ]
+        event = otlp_span(
+            convert_record(row, ConversionConfig(source_format=SourceFormat.MLFLOW_UC))[0]
+        )["events"][0]
+        self.assertEqual(
+            str(_unix_nanos(event_time, "event time")), event["timeUnixNano"]
+        )
 
     def test_variant_json_containers_convert(self):
         row = dict(self.row)
