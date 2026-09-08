@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import dataclasses
 import datetime as dt
+import decimal
 import enum
 import hashlib
 import json
@@ -307,6 +308,12 @@ def normalize(value: Any) -> Any:
         return normalize(to_python())
     if hasattr(value, "asDict"):
         value = value.asDict(recursive=True)
+    if isinstance(value, decimal.Decimal):
+        if not value.is_finite():
+            return None
+        if value == value.to_integral_value():
+            return int(value)
+        return float(value)
     if isinstance(value, Mapping):
         return {str(key): normalize(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):

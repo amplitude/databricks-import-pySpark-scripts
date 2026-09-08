@@ -1,4 +1,5 @@
 import datetime as dt
+import decimal
 import json
 import os
 import sys
@@ -140,6 +141,12 @@ class SparkValueTests(unittest.TestCase):
             },
             normalize(value),
         )
+
+    def test_decimal_and_non_finite_values_normalize_for_otlp_json(self):
+        self.assertEqual(42, normalize(decimal.Decimal("42.0")))
+        self.assertEqual(1.25, normalize(decimal.Decimal("1.25")))
+        self.assertIsNone(normalize(decimal.Decimal("NaN")))
+        self.assertIsNone(normalize(float("inf")))
 
 
 class MlflowSessionExportTests(unittest.TestCase):
