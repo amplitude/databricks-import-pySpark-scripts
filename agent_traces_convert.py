@@ -248,6 +248,8 @@ _METADATA_ATTRIBUTE_ALLOWLIST = frozenset(
         "gen_ai.tool.call.id",
         "deployment.environment",
         "service.name",
+        "amplitude.source",
+        "amplitude.content_mode",
         "openinference.span.kind",
         "llm.model_name",
         "llm.token_count.prompt",
@@ -741,7 +743,7 @@ def _mapped_otlp_span(event: Mapping[str, Any], config: ConversionConfig) -> Map
     return {
         "resourceSpans": [
             {
-                "resource": {"attributes": []},
+                "resource": {"attributes": _amplitude_resource_attributes(config)},
                 "scopeSpans": [
                     {
                         "scope": {"name": config.named_format or "databricks-mapped-columns"},
@@ -1411,6 +1413,17 @@ def _mlflow_service_name(
     return "mlflow-unity-catalog"
 
 
+def _amplitude_resource_attributes(config: ConversionConfig) -> List[Mapping[str, Any]]:
+    """Resource attributes the OTLP receiver copies onto [Agent] Source and Content Mode."""
+    return [
+        {"key": "amplitude.source", "value": {"stringValue": "databricks"}},
+        {
+            "key": "amplitude.content_mode",
+            "value": {"stringValue": config.content_mode.value},
+        },
+    ]
+
+
 def _resource_attributes(
     row: Mapping[str, Any],
     config: ConversionConfig,
@@ -1429,6 +1442,8 @@ def _resource_attributes(
     if user_id is not None:
         attributes["enduser.id"] = user_id
     attributes.setdefault("service.name", _mlflow_service_name(row, span))
+    attributes["amplitude.source"] = "databricks"
+    attributes["amplitude.content_mode"] = config.content_mode.value
     if config.content_mode == ContentMode.FULL:
         if row.get("request") is not None:
             attributes["mlflow.trace.request"] = row.get("request")
