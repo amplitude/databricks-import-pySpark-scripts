@@ -345,6 +345,12 @@ class MappedColumnsTests(unittest.TestCase):
         self.assertEqual("b" * 16, otlp_span(first)["spanId"])
         self.assertEqual("execute_tool", span_attributes(first)["gen_ai.operation.name"])
         self.assertIn("gen_ai.tool.call.arguments", span_attributes(first))
+        resource = {
+            item["key"]: item["value"]
+            for item in first.payload["resourceSpans"][0]["resource"]["attributes"]
+        }
+        self.assertEqual({"stringValue": "databricks"}, resource["amplitude.source"])
+        self.assertEqual({"stringValue": "full"}, resource["amplitude.content_mode"])
 
     def test_rows_without_trace_id_share_the_conversation_trace(self):
         first = dict(self.row, trace_id=None, span_id="b" * 16, agent_id="agent-1")
@@ -917,6 +923,18 @@ class MlflowUcTests(unittest.TestCase):
         }
         self.assertNotIn("mlflow.trace.request", resource_keys)
         self.assertNotIn("mlflow.trace.response", resource_keys)
+        resource_values = {
+            item["key"]: item["value"]
+            for item in resource["resource"]["attributes"]
+        }
+        self.assertEqual(
+            {"stringValue": "databricks"},
+            resource_values["amplitude.source"],
+        )
+        self.assertEqual(
+            {"stringValue": "metadata_only"},
+            resource_values["amplitude.content_mode"],
+        )
 
     def test_full_mode_includes_trace_request_response(self):
         config = ConversionConfig(source_format=SourceFormat.MLFLOW_UC)
