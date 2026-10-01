@@ -81,3 +81,34 @@ python agent_traces_job.py \
 For `mapped-columns`, also pass exactly one of `--mapping-json` or
 `--mapping-json-path`. Normal delivery requires `--secret-scope` and
 `--api-key-secret-key`; API keys must not be passed directly.
+
+
+## Count-free Databricks exports
+
+For `unload_databricks_data_to_s3.py` and its `TEST_` counterpart,
+`--partitioning-strategy repartition --target_partitions N` skips the preliminary
+DataFrame count and repartitions to the supplied target (minimum one). Each JSON
+or Parquet writer enforces `--max_records_per_file` independently of that target,
+so a writer task can produce several bounded files. This limits rows per file,
+not bytes per file or the number of writer tasks. The writer option does not
+change the Spark session's file limit.
+
+Without a target, repartition retains count-based sizing. The `none` and
+`coalesce` strategies retain their existing behavior.
+
+The default unit suite uses PySpark stubs:
+
+```shell
+python -m unittest discover -s test -p 'test*.py'
+```
+
+With PySpark 3.5 and a compatible Java runtime installed, run the separate local
+Spark regression suite to verify JSON/Parquet row preservation, file row limits,
+empty exports, skipping count, and isolation from subsequent exports:
+
+```shell
+python -m unittest discover -s test -p 'spark_count_free_export_regression.py'
+```
+
+This suite writes only temporary local files and requires no Databricks or S3
+credentials. It is excluded from the default stubbed unit discovery.
