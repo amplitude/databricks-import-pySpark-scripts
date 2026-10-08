@@ -485,11 +485,18 @@ def write_export_data_for_versions(
     log_info("This action will execute all deferred operations: read → filter → transform → repartition/coalesce → write")
     write_start = time.time()
 
-    if args.format == 'json':
-        export_data.write.mode("overwrite").json(args.s3_path)
-    elif args.format == 'parquet':
+    if args.format == 'parquet':
         export_data = drop_void_fields(export_data)
-        export_data.write.mode("overwrite").option("compression", "zstd").option("compressionLevel", 3).parquet(args.s3_path)
+
+    writer = export_data.write.mode("overwrite")
+    if args.partitioning_strategy == 'repartition' and args.target_partitions is not None:
+        # A fixed partition count does not bound file rows; roll files within each writer task.
+        writer = writer.option("maxRecordsPerFile", args.max_records_per_file)
+
+    if args.format == 'json':
+        writer.json(args.s3_path)
+    elif args.format == 'parquet':
+        writer.option("compression", "zstd").option("compressionLevel", 3).parquet(args.s3_path)
     else:
         raise ValueError(f"Unsupported format: {args.format}")
 
