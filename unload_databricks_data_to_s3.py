@@ -275,6 +275,22 @@ def calculate_num_partitions(df: DataFrame, max_records_per_file: int, target_pa
     return num_partitions
 
 
+def rebalance_export_dataframe(df: DataFrame, target_partitions: Optional[int]) -> DataFrame:
+    if target_partitions is not None:
+        raise ValueError("target_partitions must be omitted when using rebalance")
+    if tuple(int(part) for part in spark.version.split(".")[:2]) < (3, 2):
+        raise ValueError("rebalance requires Spark 3.2 or later")
+    for setting in (
+            "spark.sql.adaptive.enabled",
+            "spark.databricks.optimizer.adaptive.enabled",
+            "spark.sql.adaptive.coalescePartitions.enabled",
+            "spark.sql.adaptive.optimizeSkewsInRebalancePartitions.enabled"):
+        if spark.conf.get(setting, "true").lower() != "true":
+            raise ValueError(f"rebalance requires {setting}=true")
+    log_info("Planning adaptive rebalance without a count; partition sizes are resolved during write")
+    return df.hint("REBALANCE")
+
+
 def export_meta_data(event_count: int, partition_count: int):
     meta_data: list = [{'event_count': event_count, 'partition_count': partition_count}]
     spark.createDataFrame(meta_data).write.mode("overwrite").json(args.s3_path + "/meta")
@@ -471,6 +487,8 @@ def write_export_data_for_versions(
         num_partitions = calculate_num_partitions(export_data, args.max_records_per_file, args.target_partitions)
         log_info(f"Planning repartition to {num_partitions} partitions (will execute during write)")
         export_data = export_data.repartition(num_partitions)
+    elif args.partitioning_strategy == 'rebalance':
+        export_data = rebalance_export_dataframe(export_data, args.target_partitions)
     elif args.partitioning_strategy == 'coalesce':
         log_info(f"Applying coalesce strategy with max_records_per_file={args.max_records_per_file}")
         spark.conf.set("spark.sql.files.maxRecordsPerFile", args.max_records_per_file)
@@ -482,15 +500,16 @@ def write_export_data_for_versions(
 
     # Write in requested format (triggers full execution)
     log_info(f"Starting write operation to {args.s3_path} in {args.format} format")
-    log_info("This action will execute all deferred operations: read → filter → transform → repartition/coalesce → write")
+    log_info("This action will execute all deferred operations: read → filter → transform → partition → write")
     write_start = time.time()
 
     if args.format == 'parquet':
         export_data = drop_void_fields(export_data)
 
     writer = export_data.write.mode("overwrite")
-    if args.partitioning_strategy == 'repartition' and args.target_partitions is not None:
-        # A fixed partition count does not bound file rows; roll files within each writer task.
+    if args.partitioning_strategy == 'rebalance' or (
+            args.partitioning_strategy == 'repartition' and args.target_partitions is not None):
+        # Bound file rows independently of writer parallelism.
         writer = writer.option("maxRecordsPerFile", args.max_records_per_file)
 
     if args.format == 'json':
@@ -533,9 +552,9 @@ if __name__ == '__main__':
                         and update_postimage) for user/group properties. The filter is enabled by default.""",
                         action='store_true', default=False)
     parser.add_argument("--partitioning-strategy",
-                        choices=['none', 'repartition', 'coalesce'],
+                        choices=['none', 'repartition', 'coalesce', 'rebalance'],
                         default='none',
-                        help="Partitioning strategy: none (default), repartition (split based on max_records_per_file), coalesce (future use)")
+                        help="Partitioning strategy: none (default), repartition, coalesce, or rebalance (adaptive, requires AQE)")
     parser.add_argument("--max_records_per_file",
                         help="max records per output file",
                         nargs='?',

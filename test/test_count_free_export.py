@@ -37,14 +37,17 @@ MODULES = [importlib.import_module(name) for name in (
 
 
 class TestCountFreeExport(unittest.TestCase):
-    def write_export(self, module, strategy, target, format="json", limit=10):
+    def write_export(self, module, strategy, target, format="json", limit=10, settings=None, version="3.5.3"):
         dataframe = MagicMock()
         dataframe.count.return_value = 25
         dataframe.repartition.return_value = dataframe
         dataframe.coalesce.return_value = dataframe
+        dataframe.hint.return_value = dataframe
         writer = dataframe.write.mode.return_value
         writer.option.return_value = writer
         spark = MagicMock()
+        spark.version = version
+        spark.conf.get.side_effect = lambda key, default: (settings or {}).get(key, default)
         args = types.SimpleNamespace(
             partitioning_strategy=strategy,
             target_partitions=target,
@@ -60,6 +63,42 @@ class TestCountFreeExport(unittest.TestCase):
                 "SELECT * FROM source", {}, "EVENT", True, {}, args, False
             )
         return dataframe, writer, spark, drop_void
+
+    def test_rebalance_skips_count_and_caps_both_writers_without_changing_session(self):
+        for module in MODULES:
+            for format in ("json", "parquet"):
+                with self.subTest(module=module.__name__, format=format):
+                    dataframe, writer, spark, _ = self.write_export(module, "rebalance", None, format)
+                    dataframe.count.assert_not_called()
+                    dataframe.repartition.assert_not_called()
+                    dataframe.coalesce.assert_not_called()
+                    dataframe.hint.assert_called_once_with("REBALANCE")
+                    writer.option.assert_any_call("maxRecordsPerFile", 10)
+                    spark.conf.set.assert_not_called()
+                    getattr(writer, format).assert_called_once_with("s3a://test/export")
+
+    def test_rebalance_rejects_a_fixed_target(self):
+        for module in MODULES:
+            with self.subTest(module=module.__name__):
+                with self.assertRaisesRegex(ValueError, "target_partitions must be omitted"):
+                    self.write_export(module, "rebalance", 8)
+
+    def test_rebalance_rejects_unsupported_spark(self):
+        for module in MODULES:
+            with self.subTest(module=module.__name__):
+                with self.assertRaisesRegex(ValueError, "requires Spark 3.2 or later"):
+                    self.write_export(module, "rebalance", None, version="3.1.3")
+
+    def test_rebalance_requires_adaptive_partition_optimizations(self):
+        for module in MODULES:
+            for setting in (
+                    "spark.sql.adaptive.enabled",
+                    "spark.databricks.optimizer.adaptive.enabled",
+                    "spark.sql.adaptive.coalescePartitions.enabled",
+                    "spark.sql.adaptive.optimizeSkewsInRebalancePartitions.enabled"):
+                with self.subTest(module=module.__name__, setting=setting):
+                    with self.assertRaisesRegex(ValueError, setting + "=true"):
+                        self.write_export(module, "rebalance", None, settings={setting: "false"})
 
     def test_configured_repartition_skips_count_and_caps_both_writers(self):
         for module in MODULES:
