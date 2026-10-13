@@ -265,7 +265,7 @@ REBALANCE_SETTINGS = (
 )
 
 
-def restore_rebalance_settings(previous_settings: dict[str, str]) -> None:
+def restore_rebalance_settings(previous_settings: dict[str, str], export_failed: bool = False) -> None:
     first_error = None
     for setting, value in reversed(tuple(previous_settings.items())):
         try:
@@ -274,63 +274,61 @@ def restore_rebalance_settings(previous_settings: dict[str, str]) -> None:
             log_info(f"WARNING: Failed to restore {setting}: {exc}")
             first_error = first_error or exc
     previous_settings.clear()
-    if first_error is not None:
+    if first_error is not None and not export_failed:
         raise RuntimeError("Failed to restore adaptive export session settings") from first_error
+
+
+def enable_rebalance_setting(setting: str, previous_settings: dict[str, str]) -> None:
+    optional = setting == "spark.databricks.optimizer.adaptive.enabled"
+    current = spark.conf.get(setting, None) if optional else spark.conf.get(setting)
+    if current is None and optional:
+        return
+    if current is None:
+        raise ValueError(f"Runtime does not expose {setting}")
+    if current.lower() == "true":
+        return
+    if not spark.conf.isModifiable(setting):
+        raise ValueError(f"Runtime cannot modify {setting}")
+    previous_settings[setting] = current
+    spark.conf.set(setting, "true")
+    if spark.conf.get(setting, "false").lower() != "true":
+        raise ValueError(f"Runtime did not enable {setting}")
+
+
+def prepare_rebalance_session(configure: bool, previous_settings: dict[str, str]) -> None:
+    if tuple(int(part) for part in spark.version.split(".")[:2]) < (3, 2):
+        raise ValueError("rebalance requires Spark 3.2 or later")
+    for setting in REBALANCE_SETTINGS:
+        if configure:
+            enable_rebalance_setting(setting, previous_settings)
+        elif spark.conf.get(setting, "true").lower() != "true":
+            raise ValueError(f"rebalance requires {setting}=true")
+
+
+def resolve_partitioning_strategy(args, previous_settings: dict[str, str]) -> str:
+    if args.partitioning_strategy != "rebalance":
+        return args.partitioning_strategy
+    if args.target_partitions is not None:
+        raise ValueError("target_partitions must be omitted when using rebalance")
+    if not getattr(args, "configure_rebalance_aqe", False):
+        prepare_rebalance_session(False, previous_settings)
+        return "rebalance"
+    try:
+        prepare_rebalance_session(True, previous_settings)
+    except Exception as exc:
+        restore_rebalance_settings(previous_settings)
+        log_info(f"WARNING: Adaptive export unavailable; using count-based repartition: {exc}")
+        return "repartition"
+    return "rebalance"
 
 
 @contextmanager
 def configured_rebalance_session(args):
-    if args.partitioning_strategy != "rebalance" or not getattr(args, "configure_rebalance_aqe", False):
-        yield True
-        return
-    if args.target_partitions is not None:
-        raise ValueError("target_partitions must be omitted when using rebalance")
-
     previous_settings = {}
-    ready = False
     try:
-        try:
-            if tuple(int(part) for part in spark.version.split(".")[:2]) < (3, 2):
-                raise ValueError("rebalance requires Spark 3.2 or later")
-            for setting in REBALANCE_SETTINGS:
-                current = (spark.conf.get(setting, None)
-                           if setting == "spark.databricks.optimizer.adaptive.enabled"
-                           else spark.conf.get(setting))
-                if current is None and setting == "spark.databricks.optimizer.adaptive.enabled":
-                    continue
-                if current is None:
-                    raise ValueError(f"Runtime does not expose {setting}")
-                if current.lower() != "true":
-                    if not spark.conf.isModifiable(setting):
-                        raise ValueError(f"Runtime cannot modify {setting}")
-                    previous_settings[setting] = current
-                    spark.conf.set(setting, "true")
-                    if spark.conf.get(setting, "false").lower() != "true":
-                        raise ValueError(f"Runtime did not enable {setting}")
-            ready = True
-        except Exception as exc:
-            restore_rebalance_settings(previous_settings)
-            log_info(f"WARNING: Adaptive export unavailable; using count-based repartition: {exc}")
-        yield ready
+        yield resolve_partitioning_strategy(args, previous_settings)
     finally:
-        export_failed = sys.exc_info()[0] is not None
-        try:
-            restore_rebalance_settings(previous_settings)
-        except Exception:
-            if not export_failed:
-                raise
-
-
-def rebalance_export_dataframe(df: DataFrame, target_partitions: Optional[int]) -> DataFrame:
-    if target_partitions is not None:
-        raise ValueError("target_partitions must be omitted when using rebalance")
-    if tuple(int(part) for part in spark.version.split(".")[:2]) < (3, 2):
-        raise ValueError("rebalance requires Spark 3.2 or later")
-    for setting in REBALANCE_SETTINGS:
-        if spark.conf.get(setting, "true").lower() != "true":
-            raise ValueError(f"rebalance requires {setting}=true")
-    log_info("Planning adaptive rebalance without a count; partition sizes are resolved during write")
-    return df.hint("REBALANCE")
+        restore_rebalance_settings(previous_settings, export_failed=sys.exc_info()[0] is not None)
 
 
 def export_meta_data(event_count: int, partition_count: int):
@@ -480,80 +478,26 @@ def build_export_dataframe(sql_to_run: str) -> DataFrame:
         raise
 
 
-def write_export_data_for_versions(
-        original_sql: str,
-        table_to_import_version_range_map: dict[str, list[int]],
-        data_type: str,
-        ingestion_in_mutability_mode: bool,
-        table_results: dict[str, dict[str, object]],
-        args,
-        force_latest_only: bool) -> None:
-    with configured_rebalance_session(args) as use_rebalance:
-        _write_export_data_for_versions(
-            original_sql, table_to_import_version_range_map, data_type,
-            ingestion_in_mutability_mode, table_results, args, force_latest_only, use_rebalance
-        )
-
-
-def _write_export_data_for_versions(
-        original_sql: str,
-        table_to_import_version_range_map: dict[str, list[int]],
-        data_type: str,
-        ingestion_in_mutability_mode: bool,
-        table_results: dict[str, dict[str, object]],
-        args,
-        force_latest_only: bool,
-        use_rebalance: bool) -> None:
-    """
-    Build views for all tables (optionally forcing latest-only), create export DataFrame, apply
-    partitioning strategy, and perform the write which TRIGGERS execution (lazy → materialized).
-
-    Error surfacing strategy with lazy execution:
-    - Exceptions often occur only at write time. We therefore propagate any exception to the caller,
-      which inspects the message for the CDF signature and, if present, retries the retrieval, transformation, 
-      and write in latest-only mode to recover. If the error is non-CDF, the caller re-raises.
-    """
-    sql_to_run = build_views_for_tables(
-        original_sql=original_sql,
-        table_to_import_version_range_map=table_to_import_version_range_map,
-        data_type=data_type,
-        ingestion_in_mutability_mode=ingestion_in_mutability_mode,
-        table_results=table_results,
-        force_latest_only=force_latest_only,
-    )
-
-    # Create export DataFrame (deferred execution)
-    log_info("Creating DataFrame with SQL transformation (execution deferred)")
-    export_data: DataFrame = build_export_dataframe(sql_to_run)
-
-    # Validate max_records_per_file for any partitioning strategy
-    if args.partitioning_strategy != 'none' and args.max_records_per_file <= 0:
-        raise ValueError(
-            f"max_records_per_file must be greater than 0 when using partitioning strategy '{args.partitioning_strategy}', "
-            f"got {args.max_records_per_file}")
-
-    # Apply partitioning strategy
-    if args.partitioning_strategy == 'repartition':
+def partition_export_dataframe(export_data: DataFrame, args, strategy: str) -> DataFrame:
+    if strategy == 'repartition':
         log_info(f"Applying repartition strategy with max_records_per_file={args.max_records_per_file}")
         num_partitions = calculate_num_partitions(export_data, args.max_records_per_file, args.target_partitions)
         log_info(f"Planning repartition to {num_partitions} partitions (will execute during write)")
-        export_data = export_data.repartition(num_partitions)
-    elif args.partitioning_strategy == 'rebalance':
-        if use_rebalance:
-            export_data = rebalance_export_dataframe(export_data, args.target_partitions)
-        else:
-            num_partitions = calculate_num_partitions(export_data, args.max_records_per_file)
-            export_data = export_data.repartition(num_partitions)
-    elif args.partitioning_strategy == 'coalesce':
+        return export_data.repartition(num_partitions)
+    if strategy == 'rebalance':
+        log_info("Planning adaptive rebalance without a count; partition sizes are resolved during write")
+        return export_data.hint("REBALANCE")
+    if strategy == 'coalesce':
         log_info(f"Applying coalesce strategy with max_records_per_file={args.max_records_per_file}")
         spark.conf.set("spark.sql.files.maxRecordsPerFile", args.max_records_per_file)
         num_partitions = calculate_num_partitions(export_data, args.max_records_per_file, args.target_partitions)
         log_info(f"Planning coalesce to {num_partitions} partitions (will execute during write)")
-        export_data = export_data.coalesce(num_partitions)
-    else:
-        log_info("No partitioning strategy specified - writing with existing partition structure")
+        return export_data.coalesce(num_partitions)
+    log_info("No partitioning strategy specified - writing with existing partition structure")
+    return export_data
 
-    # Write in requested format (triggers full execution)
+
+def write_export_dataframe(export_data: DataFrame, args) -> None:
     log_info(f"Starting write operation to {args.s3_path} in {args.format} format")
     log_info("This action will execute all deferred operations: read → filter → transform → partition → write")
     write_start = time.time()
@@ -576,6 +520,47 @@ def _write_export_data_for_versions(
 
     write_time = time.time() - write_start
     log_info(f"Write complete in {write_time:.2f} seconds")
+
+
+def write_export_data_for_versions(
+        original_sql: str,
+        table_to_import_version_range_map: dict[str, list[int]],
+        data_type: str,
+        ingestion_in_mutability_mode: bool,
+        table_results: dict[str, dict[str, object]],
+        args,
+        force_latest_only: bool) -> None:
+    """
+    Build views for all tables (optionally forcing latest-only), create export DataFrame, apply
+    partitioning strategy, and perform the write which TRIGGERS execution (lazy → materialized).
+
+    Error surfacing strategy with lazy execution:
+    - Exceptions often occur only at write time. We therefore propagate any exception to the caller,
+      which inspects the message for the CDF signature and, if present, retries the retrieval, transformation,
+      and write in latest-only mode to recover. If the error is non-CDF, the caller re-raises.
+    """
+    with configured_rebalance_session(args) as strategy:
+        sql_to_run = build_views_for_tables(
+            original_sql=original_sql,
+            table_to_import_version_range_map=table_to_import_version_range_map,
+            data_type=data_type,
+            ingestion_in_mutability_mode=ingestion_in_mutability_mode,
+            table_results=table_results,
+            force_latest_only=force_latest_only,
+        )
+
+        # Create export DataFrame (deferred execution)
+        log_info("Creating DataFrame with SQL transformation (execution deferred)")
+        export_data: DataFrame = build_export_dataframe(sql_to_run)
+
+        # Validate max_records_per_file for any partitioning strategy
+        if args.partitioning_strategy != 'none' and args.max_records_per_file <= 0:
+            raise ValueError(
+                f"max_records_per_file must be greater than 0 when using partitioning strategy '{args.partitioning_strategy}', "
+                f"got {args.max_records_per_file}")
+
+        export_data = partition_export_dataframe(export_data, args, strategy)
+        write_export_dataframe(export_data, args)
 
 
 # Example: python3 ./unload_databricks_data_to_s3.py --table_versions_map test_category_do_not_delete_or_modify.canary_tests.employee=16-16 --data_type EVENT --sql "select unix_millis(current_timestamp()) as time, id as user_id, \"databricks_import_canary_test_event\" as event_type, named_struct('name', name, 'home', home, 'age', age, 'income', income) as user_properties, named_struct('group_type1', ARRAY(\"group_A\", \"group_B\")) as groups, named_struct('group_property', \"group_property_value\") as group_properties from test_category_do_not_delete_or_modify.canary_tests.employee" --secret_scope amplitude_databricks_import --secret_key_name_for_aws_access_key source_destination_55_batch_1350266533_aws_access_key --secret_key_name_for_aws_secret_key source_destination_55_batch_1350266533_aws_secret_key --secret_key_name_for_aws_session_token source_destination_55_batch_1350266533_aws_session_token --s3_region us-west-2 --s3_endpoint s3.us-west-2.amazonaws.com --s3_path s3a://com-amplitude-falcon-stag2/databricks_import/unloaded_data/source_destination_55/batch_1350266533/

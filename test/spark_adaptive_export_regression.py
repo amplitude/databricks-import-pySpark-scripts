@@ -106,8 +106,8 @@ class TestSparkAdaptiveExport(unittest.TestCase):
                 args = types.SimpleNamespace(partitioning_strategy="rebalance", target_partitions=None,
                                              configure_rebalance_aqe=True)
                 with patch.object(module, "spark", self.spark, create=True):
-                    with module.configured_rebalance_session(args) as ready:
-                        self.assertTrue(ready)
+                    with module.configured_rebalance_session(args) as strategy:
+                        self.assertEqual("rebalance", strategy)
                         for key in settings:
                             self.assertEqual("true", self.spark.conf.get(key))
         finally:

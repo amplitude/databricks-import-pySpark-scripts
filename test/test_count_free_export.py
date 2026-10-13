@@ -38,7 +38,7 @@ MODULES = [importlib.import_module(name) for name in (
 
 class TestCountFreeExport(unittest.TestCase):
     def write_export(self, module, strategy, target, format="json", limit=10, settings=None, version="3.5.3",
-                     configure=False, locked=None, setter_failure=None, ignore_setting=None, write_error=None, restore_failure=None):
+                     configure=False, locked=None, setter_failure=None, ignore_setting=None, write_error=None, restore_failure=None, plan_error=None):
         dataframe = MagicMock()
         dataframe.count.return_value = 25
         dataframe.repartition.return_value = dataframe
@@ -81,7 +81,7 @@ class TestCountFreeExport(unittest.TestCase):
         )
         with patch.object(module, "spark", spark, create=True), \
                 patch.object(module, "build_views_for_tables", return_value="SELECT * FROM source"), \
-                patch.object(module, "build_export_dataframe", return_value=dataframe), \
+                patch.object(module, "build_export_dataframe", return_value=dataframe, side_effect=plan_error), \
                 patch.object(module, "drop_void_fields", return_value=dataframe) as drop_void:
             module.write_export_data_for_versions(
                 "SELECT * FROM source", {}, "EVENT", True, {}, args, False
@@ -168,6 +168,19 @@ class TestCountFreeExport(unittest.TestCase):
                     self.assertEqual(settings, self.last_spark.test_settings)
                     self.last_dataframe.count.assert_not_called()
                     self.last_dataframe.repartition.assert_not_called()
+
+    def test_configured_rebalance_restores_session_after_planning_failure(self):
+        for module in MODULES:
+            with self.subTest(module=module.__name__):
+                settings = {key: "false" for key in module.REBALANCE_SETTINGS}
+                error = RuntimeError("query planning failed")
+                with self.assertRaises(RuntimeError) as raised:
+                    self.write_export(module, "rebalance", None, configure=True,
+                                      settings=settings, plan_error=error)
+                self.assertIs(error, raised.exception)
+                self.assertEqual(settings, self.last_spark.test_settings)
+                self.last_dataframe.count.assert_not_called()
+                self.last_dataframe.write.mode.assert_not_called()
 
     def test_restore_failure_attempts_other_settings_and_fails_the_export(self):
         for module in MODULES:
