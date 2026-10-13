@@ -118,6 +118,24 @@ disabled, because otherwise Spark could ignore the hint or retain tiny writer
 partitions. JSON and Parquet retain the writer-scoped `--max_records_per_file`
 limit: adaptive byte sizing is not a row cap or a guarantee of output file bytes.
 
+Add `--configure_rebalance_aqe` to enable the required AQE settings in the
+export's Spark session before planning the query. Settings already enabled are
+left alone; settings changed by the exporter are restored after the write,
+including on failure. This does not change the cluster configuration, worker
+count, initial shuffle parallelism, or advisory partition size. The
+Databricks-specific setting is configured only when the runtime exposes it.
+
+With this switch, Spark versions older than 3.2, missing prerequisites, or
+settings that cannot be enabled fall back to the existing count-based
+repartition path. The fallback retains the writer-scoped row cap for JSON and
+Parquet and logs its reason. Errors reading the source or writing the export
+still propagate normally. Without this switch, the strict prerequisite checks
+above remain in effect.
+
+Deploy exporter support before the Falcon follow-up starts sending this switch
+for connections configured with `rebalance`. Existing installed exporter jobs
+must be updated before those connections are opted in.
+
 After the exporter change is deployed, Falcon can opt a connection into this
 mode through `falcon.databricksImport.partitioningStrategyOverrides` using
 `"CONNECTION_ID": "rebalance"` (requires the paired Falcon strategy change).

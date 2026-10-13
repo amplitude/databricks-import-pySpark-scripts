@@ -40,7 +40,7 @@ class TestSparkAdaptiveExport(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
 
-    def export_and_validate(self, module, format, rows, initial_partitions, advisory_bytes, limit):
+    def export_and_validate(self, module, format, rows, initial_partitions, advisory_bytes, limit, configure=False):
         self.spark.conf.set("spark.sql.shuffle.partitions", initial_partitions)
         self.spark.conf.set("spark.sql.adaptive.advisoryPartitionSizeInBytes", advisory_bytes)
         sql = (f"SELECT id, concat(sha2(cast(id AS STRING), 256), "
@@ -50,10 +50,11 @@ class TestSparkAdaptiveExport(unittest.TestCase):
         expected = self.spark.sql(sql)
         destination = Path(self.directory.name) / module.__name__ / format
         args = types.SimpleNamespace(partitioning_strategy="rebalance", target_partitions=None,
-                                     max_records_per_file=limit, format=format, s3_path=str(destination))
+                                     max_records_per_file=limit, format=format, s3_path=str(destination),
+                                     configure_rebalance_aqe=configure)
         settings = {key: self.spark.conf.get(key, "true") for key in (
             "spark.sql.shuffle.partitions", "spark.sql.adaptive.advisoryPartitionSizeInBytes",
-            "spark.sql.files.maxRecordsPerFile", "spark.sql.adaptive.enabled")}
+            "spark.sql.files.maxRecordsPerFile", *MODULES[0].REBALANCE_SETTINGS)}
         with patch.object(module, "spark", self.spark, create=True), \
                 patch.object(module, "build_views_for_tables", return_value=sql), \
                 patch.object(DataFrame, "count", side_effect=AssertionError("export must not count")):
@@ -94,6 +95,43 @@ class TestSparkAdaptiveExport(unittest.TestCase):
                     tasks, files = self.export_and_validate(module, format, 37, 64, "64MB", 5)
                     self.assertEqual(1, tasks)
                     self.assertGreater(files, tasks)
+
+    def test_session_setup_reads_registered_defaults_without_session_overrides(self):
+        settings = {key: self.spark.conf.get(key) for key in MODULES[0].REBALANCE_SETTINGS
+                    if key != "spark.databricks.optimizer.adaptive.enabled"}
+        try:
+            for key in settings:
+                self.spark.conf.unset(key)
+            for module in MODULES:
+                args = types.SimpleNamespace(partitioning_strategy="rebalance", target_partitions=None,
+                                             configure_rebalance_aqe=True)
+                with patch.object(module, "spark", self.spark, create=True):
+                    with module.configured_rebalance_session(args) as ready:
+                        self.assertTrue(ready)
+                        for key in settings:
+                            self.assertEqual("true", self.spark.conf.get(key))
+        finally:
+            for key, value in settings.items():
+                self.spark.conf.set(key, value)
+
+    def test_session_setup_enables_aqe_and_restores_disabled_settings(self):
+        settings = {key: self.spark.conf.get(key, None) for key in MODULES[0].REBALANCE_SETTINGS}
+        try:
+            for key, value in settings.items():
+                if value is not None:
+                    self.spark.conf.set(key, "false")
+            for module in MODULES:
+                for format in ("json", "parquet"):
+                    with self.subTest(module=module.__name__, format=format):
+                        tasks, files = self.export_and_validate(
+                            module, format, 37, 64, "64MB", 5, configure=True
+                        )
+                        self.assertEqual(1, tasks)
+                        self.assertGreater(files, tasks)
+        finally:
+            for key, value in settings.items():
+                if value is not None:
+                    self.spark.conf.set(key, value)
 
     def test_empty_export_does_not_count(self):
         for module in MODULES:

@@ -12,6 +12,8 @@ import math
 import re
 import uuid
 import time
+import sys
+from contextlib import contextmanager
 from typing import Optional
 from datetime import datetime
 
@@ -255,16 +257,76 @@ def calculate_num_partitions(df: DataFrame, max_records_per_file: int, target_pa
     return num_partitions
 
 
+REBALANCE_SETTINGS = (
+    "spark.sql.adaptive.enabled",
+    "spark.databricks.optimizer.adaptive.enabled",
+    "spark.sql.adaptive.coalescePartitions.enabled",
+    "spark.sql.adaptive.optimizeSkewsInRebalancePartitions.enabled",
+)
+
+
+def restore_rebalance_settings(previous_settings: dict[str, str]) -> None:
+    first_error = None
+    for setting, value in reversed(tuple(previous_settings.items())):
+        try:
+            spark.conf.set(setting, value)
+        except Exception as exc:
+            log_info(f"WARNING: Failed to restore {setting}: {exc}")
+            first_error = first_error or exc
+    previous_settings.clear()
+    if first_error is not None:
+        raise RuntimeError("Failed to restore adaptive export session settings") from first_error
+
+
+@contextmanager
+def configured_rebalance_session(args):
+    if args.partitioning_strategy != "rebalance" or not getattr(args, "configure_rebalance_aqe", False):
+        yield True
+        return
+    if args.target_partitions is not None:
+        raise ValueError("target_partitions must be omitted when using rebalance")
+
+    previous_settings = {}
+    ready = False
+    try:
+        try:
+            if tuple(int(part) for part in spark.version.split(".")[:2]) < (3, 2):
+                raise ValueError("rebalance requires Spark 3.2 or later")
+            for setting in REBALANCE_SETTINGS:
+                current = (spark.conf.get(setting, None)
+                           if setting == "spark.databricks.optimizer.adaptive.enabled"
+                           else spark.conf.get(setting))
+                if current is None and setting == "spark.databricks.optimizer.adaptive.enabled":
+                    continue
+                if current is None:
+                    raise ValueError(f"Runtime does not expose {setting}")
+                if current.lower() != "true":
+                    if not spark.conf.isModifiable(setting):
+                        raise ValueError(f"Runtime cannot modify {setting}")
+                    previous_settings[setting] = current
+                    spark.conf.set(setting, "true")
+                    if spark.conf.get(setting, "false").lower() != "true":
+                        raise ValueError(f"Runtime did not enable {setting}")
+            ready = True
+        except Exception as exc:
+            restore_rebalance_settings(previous_settings)
+            log_info(f"WARNING: Adaptive export unavailable; using count-based repartition: {exc}")
+        yield ready
+    finally:
+        export_failed = sys.exc_info()[0] is not None
+        try:
+            restore_rebalance_settings(previous_settings)
+        except Exception:
+            if not export_failed:
+                raise
+
+
 def rebalance_export_dataframe(df: DataFrame, target_partitions: Optional[int]) -> DataFrame:
     if target_partitions is not None:
         raise ValueError("target_partitions must be omitted when using rebalance")
     if tuple(int(part) for part in spark.version.split(".")[:2]) < (3, 2):
         raise ValueError("rebalance requires Spark 3.2 or later")
-    for setting in (
-            "spark.sql.adaptive.enabled",
-            "spark.databricks.optimizer.adaptive.enabled",
-            "spark.sql.adaptive.coalescePartitions.enabled",
-            "spark.sql.adaptive.optimizeSkewsInRebalancePartitions.enabled"):
+    for setting in REBALANCE_SETTINGS:
         if spark.conf.get(setting, "true").lower() != "true":
             raise ValueError(f"rebalance requires {setting}=true")
     log_info("Planning adaptive rebalance without a count; partition sizes are resolved during write")
@@ -426,6 +488,22 @@ def write_export_data_for_versions(
         table_results: dict[str, dict[str, object]],
         args,
         force_latest_only: bool) -> None:
+    with configured_rebalance_session(args) as use_rebalance:
+        _write_export_data_for_versions(
+            original_sql, table_to_import_version_range_map, data_type,
+            ingestion_in_mutability_mode, table_results, args, force_latest_only, use_rebalance
+        )
+
+
+def _write_export_data_for_versions(
+        original_sql: str,
+        table_to_import_version_range_map: dict[str, list[int]],
+        data_type: str,
+        ingestion_in_mutability_mode: bool,
+        table_results: dict[str, dict[str, object]],
+        args,
+        force_latest_only: bool,
+        use_rebalance: bool) -> None:
     """
     Build views for all tables (optionally forcing latest-only), create export DataFrame, apply
     partitioning strategy, and perform the write which TRIGGERS execution (lazy → materialized).
@@ -461,7 +539,11 @@ def write_export_data_for_versions(
         log_info(f"Planning repartition to {num_partitions} partitions (will execute during write)")
         export_data = export_data.repartition(num_partitions)
     elif args.partitioning_strategy == 'rebalance':
-        export_data = rebalance_export_dataframe(export_data, args.target_partitions)
+        if use_rebalance:
+            export_data = rebalance_export_dataframe(export_data, args.target_partitions)
+        else:
+            num_partitions = calculate_num_partitions(export_data, args.max_records_per_file)
+            export_data = export_data.repartition(num_partitions)
     elif args.partitioning_strategy == 'coalesce':
         log_info(f"Applying coalesce strategy with max_records_per_file={args.max_records_per_file}")
         spark.conf.set("spark.sql.files.maxRecordsPerFile", args.max_records_per_file)
@@ -538,6 +620,9 @@ if __name__ == '__main__':
                         choices=['json', 'parquet'],
                         default='json',
                         help="Output format: json (uncompressed) or parquet (zstd level 3)")
+    parser.add_argument("--configure_rebalance_aqe", action='store_true', default=False,
+                        help="Enable adaptive SQL settings during rebalance exports; fall back to count-based "
+                             "repartition on unsupported runtimes, then restore changed session settings")
     parser.add_argument("--target_partitions",
                         help="Target number of partitions based on cluster size (optional, calculated as maxNodes * multiplier)",
                         nargs='?',
