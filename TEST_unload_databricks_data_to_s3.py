@@ -240,8 +240,7 @@ def calculate_num_partitions(df: DataFrame, max_records_per_file: int, target_pa
     """
     # TODO: Add unit tests for partition calculation logic with various target_partitions values
     if target_partitions is not None:
-        # Use target_partitions directly for full control during testing/rollout
-        # Once we understand performance impact, we may revert to max(calculated, target)
+        # Partition parallelism is independent of file rollover; an explicit target skips counting.
         num_partitions = max(1, target_partitions)
         log_info(f"Partition sizing: using target from cluster={num_partitions}")
     else:
@@ -492,6 +491,7 @@ def partition_export_dataframe(export_data: DataFrame, args, strategy: str) -> D
         spark.conf.set("spark.sql.files.maxRecordsPerFile", args.max_records_per_file)
         num_partitions = calculate_num_partitions(export_data, args.max_records_per_file, args.target_partitions)
         log_info(f"Planning coalesce to {num_partitions} partitions (will execute during write)")
+        # Coalesce merges existing partitions; a larger target cannot increase their number.
         return export_data.coalesce(num_partitions)
     log_info("No partitioning strategy specified - writing with existing partition structure")
     return export_data
@@ -594,7 +594,11 @@ if __name__ == '__main__':
     parser.add_argument("--partitioning-strategy",
                         choices=['none', 'repartition', 'coalesce', 'rebalance'],
                         default='none',
-                        help="Partitioning strategy: none (default), repartition, coalesce, or rebalance (adaptive, requires AQE)")
+                        help="Partitioning strategy: none (default, preserve existing partitions); "
+                             "repartition (redistribute to target_partitions, or count-based sizing using "
+                             "max_records_per_file when omitted); coalesce (reduce existing partitions "
+                             "using the same sizing rules); rebalance (adapt partition sizes during execution "
+                             "without counting, requires AQE)")
     parser.add_argument("--max_records_per_file",
                         help="max records per output file",
                         nargs='?',
