@@ -96,6 +96,48 @@ change the Spark session's file limit.
 Without a target, repartition retains count-based sizing. The `none` and
 `coalesce` strategies retain their existing behavior.
 
+### Adaptive export partitioning
+
+`--partitioning-strategy rebalance` skips the preliminary count and applies a
+Spark `REBALANCE` hint with no fixed target. AQE uses runtime shuffle sizes to
+combine small partitions and split oversized ones during the write. Initial
+shuffle parallelism and advisory byte sizes come from the existing Spark session
+configuration; the exporter does not change those settings or the worker count.
+Queued tasks can use additional executors if the cluster scales up, but this mode
+does not guarantee full utilization of every potential worker.
+
+The mode requires Spark 3.2 or later and the following settings enabled:
+
+- `spark.sql.adaptive.enabled`
+- `spark.databricks.optimizer.adaptive.enabled` on Databricks
+- `spark.sql.adaptive.coalescePartitions.enabled`
+- `spark.sql.adaptive.optimizeSkewsInRebalancePartitions.enabled`
+
+The exporter enables the required AQE settings in the export's Spark session
+before planning the query. Settings already enabled are left alone; settings
+changed by the exporter are restored after the write, including on failure.
+This does not change the cluster configuration, worker count, initial shuffle
+parallelism, or advisory partition size. The Databricks-specific setting is
+configured only when the runtime exposes it.
+
+Spark versions older than 3.2, missing prerequisites, or settings that cannot be
+enabled fall back to the existing count-based repartition path. The fallback
+retains the writer-scoped row cap for JSON and Parquet and logs its reason.
+Errors reading the source or writing the export still propagate normally.
+
+The mode rejects `--target_partitions`. JSON and Parquet retain the writer-scoped
+`--max_records_per_file` limit: adaptive byte sizing is not a row cap or a
+guarantee of output file bytes.
+
+Deploy exporter support before opting connections into `rebalance`. Existing
+installed exporter jobs must be updated before those connections are opted in.
+
+After the exporter change is deployed, Falcon can opt a connection into this
+mode through `falcon.databricksImport.partitioningStrategyOverrides` using
+`"CONNECTION_ID": "rebalance"` (requires the paired Falcon strategy change).
+Existing connection defaults are unchanged; remove the entry to roll back.
+Verify on the intended Databricks runtime before a production canary.
+
 The default unit suite uses PySpark stubs:
 
 ```shell
@@ -107,8 +149,11 @@ Spark regression suite to verify JSON/Parquet row preservation, file row limits,
 empty exports, skipping count, and isolation from subsequent exports:
 
 ```shell
-python -m unittest discover -s test -p 'spark_count_free_export_regression.py'
+python -m unittest discover -s test -p 'spark_*_regression.py'
 ```
 
-This suite writes only temporary local files and requires no Databricks or S3
-credentials. It is excluded from the default stubbed unit discovery.
+These suites write only temporary local files and require no Databricks or S3
+credentials. The adaptive suite also verifies that 10,000 rows coalesce to one
+writer task, a larger export splits beyond its initial shuffle partition count,
+and a coalesced task still rotates capped files. They are excluded from the
+default stubbed unit discovery and run in the separate Spark CI job.
