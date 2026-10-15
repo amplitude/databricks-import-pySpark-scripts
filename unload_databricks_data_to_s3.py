@@ -5,7 +5,6 @@ import math
 import re
 import uuid
 import time
-import sys
 from contextlib import contextmanager
 from typing import Optional
 from datetime import datetime
@@ -338,10 +337,12 @@ def resolve_partitioning_strategy(args, previous_settings: dict[str, str]) -> st
 @contextmanager
 def configured_rebalance_session(args):
     previous_settings = {}
+    export_failed = True
     try:
         yield resolve_partitioning_strategy(args, previous_settings)
+        export_failed = False
     finally:
-        restore_rebalance_settings(previous_settings, export_failed=sys.exc_info()[0] is not None)
+        restore_rebalance_settings(previous_settings, export_failed=export_failed)
 
 
 def export_meta_data(event_count: int, partition_count: int):

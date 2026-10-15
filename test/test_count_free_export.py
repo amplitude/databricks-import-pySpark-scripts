@@ -201,6 +201,25 @@ class TestCountFreeExport(unittest.TestCase):
             self.assertIs(error, raised.exception)
             self.last_dataframe.count.assert_not_called()
 
+    def test_successful_retry_does_not_suppress_restore_failure(self):
+        for module in MODULES:
+            for format in ("json", "parquet"):
+                with self.subTest(module=module.__name__, format=format):
+                    settings = {key: "false" for key in module.REBALANCE_SETTINGS}
+                    error = RuntimeError("DELTA_CHANGE_DATA_FILE_NOT_FOUND")
+                    try:
+                        self.write_export(module, "rebalance", None, format,
+                                          settings=settings, write_error=error)
+                    except RuntimeError as initial_error:
+                        self.assertIs(error, initial_error)
+                        with self.assertRaisesRegex(RuntimeError, "Failed to restore adaptive export"):
+                            self.write_export(module, "rebalance", None, format,
+                                              settings=settings, restore_failure=module.REBALANCE_SETTINGS[-1])
+                        writer = self.last_dataframe.write.mode.return_value
+                        getattr(writer, format).assert_called_once_with("s3a://test/export")
+                    else:
+                        self.fail("Expected the initial CDF failure")
+
     def test_rebalance_rejects_a_fixed_target_even_on_old_spark(self):
         for module in MODULES:
             with self.assertRaisesRegex(ValueError, "target_partitions must be omitted"):
