@@ -40,7 +40,7 @@ class TestSparkAdaptiveExport(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
 
-    def export_and_validate(self, module, format, rows, initial_partitions, advisory_bytes, limit, configure=False):
+    def export_and_validate(self, module, format, rows, initial_partitions, advisory_bytes, limit):
         self.spark.conf.set("spark.sql.shuffle.partitions", initial_partitions)
         self.spark.conf.set("spark.sql.adaptive.advisoryPartitionSizeInBytes", advisory_bytes)
         sql = (f"SELECT id, concat(sha2(cast(id AS STRING), 256), "
@@ -50,8 +50,7 @@ class TestSparkAdaptiveExport(unittest.TestCase):
         expected = self.spark.sql(sql)
         destination = Path(self.directory.name) / module.__name__ / format
         args = types.SimpleNamespace(partitioning_strategy="rebalance", target_partitions=None,
-                                     max_records_per_file=limit, format=format, s3_path=str(destination),
-                                     configure_rebalance_aqe=configure)
+                                     max_records_per_file=limit, format=format, s3_path=str(destination))
         settings = {key: self.spark.conf.get(key, "true") for key in (
             "spark.sql.shuffle.partitions", "spark.sql.adaptive.advisoryPartitionSizeInBytes",
             "spark.sql.files.maxRecordsPerFile", *MODULES[0].REBALANCE_SETTINGS)}
@@ -103,8 +102,7 @@ class TestSparkAdaptiveExport(unittest.TestCase):
             for key in settings:
                 self.spark.conf.unset(key)
             for module in MODULES:
-                args = types.SimpleNamespace(partitioning_strategy="rebalance", target_partitions=None,
-                                             configure_rebalance_aqe=True)
+                args = types.SimpleNamespace(partitioning_strategy="rebalance", target_partitions=None)
                 with patch.object(module, "spark", self.spark, create=True):
                     with module.configured_rebalance_session(args) as strategy:
                         self.assertEqual("rebalance", strategy)
@@ -124,7 +122,7 @@ class TestSparkAdaptiveExport(unittest.TestCase):
                 for format in ("json", "parquet"):
                     with self.subTest(module=module.__name__, format=format):
                         tasks, files = self.export_and_validate(
-                            module, format, 37, 64, "64MB", 5, configure=True
+                            module, format, 37, 64, "64MB", 5
                         )
                         self.assertEqual(1, tasks)
                         self.assertGreater(files, tasks)

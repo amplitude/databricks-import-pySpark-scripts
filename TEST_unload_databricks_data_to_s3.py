@@ -294,14 +294,11 @@ def enable_rebalance_setting(setting: str, previous_settings: dict[str, str]) ->
         raise ValueError(f"Runtime did not enable {setting}")
 
 
-def prepare_rebalance_session(configure: bool, previous_settings: dict[str, str]) -> None:
+def prepare_rebalance_session(previous_settings: dict[str, str]) -> None:
     if tuple(int(part) for part in spark.version.split(".")[:2]) < (3, 2):
         raise ValueError("rebalance requires Spark 3.2 or later")
     for setting in REBALANCE_SETTINGS:
-        if configure:
-            enable_rebalance_setting(setting, previous_settings)
-        elif spark.conf.get(setting, "true").lower() != "true":
-            raise ValueError(f"rebalance requires {setting}=true")
+        enable_rebalance_setting(setting, previous_settings)
 
 
 def resolve_partitioning_strategy(args, previous_settings: dict[str, str]) -> str:
@@ -309,11 +306,8 @@ def resolve_partitioning_strategy(args, previous_settings: dict[str, str]) -> st
         return args.partitioning_strategy
     if args.target_partitions is not None:
         raise ValueError("target_partitions must be omitted when using rebalance")
-    if not getattr(args, "configure_rebalance_aqe", False):
-        prepare_rebalance_session(False, previous_settings)
-        return "rebalance"
     try:
-        prepare_rebalance_session(True, previous_settings)
+        prepare_rebalance_session(previous_settings)
     except Exception as exc:
         restore_rebalance_settings(previous_settings)
         log_info(f"WARNING: Adaptive export unavailable; using count-based repartition: {exc}")
@@ -598,7 +592,7 @@ if __name__ == '__main__':
                              "repartition (redistribute to target_partitions, or count-based sizing using "
                              "max_records_per_file when omitted); coalesce (reduce existing partitions "
                              "using the same sizing rules); rebalance (adapt partition sizes during execution "
-                             "without counting, requires AQE)")
+                             "without counting, enables AQE or falls back to count-based repartition)")
     parser.add_argument("--max_records_per_file",
                         help="max records per output file",
                         nargs='?',
@@ -609,9 +603,6 @@ if __name__ == '__main__':
                         choices=['json', 'parquet'],
                         default='json',
                         help="Output format: json (uncompressed) or parquet (zstd level 3)")
-    parser.add_argument("--configure_rebalance_aqe", action='store_true', default=False,
-                        help="Enable adaptive SQL settings during rebalance exports; fall back to count-based "
-                             "repartition on unsupported runtimes, then restore changed session settings")
     parser.add_argument("--target_partitions",
                         help="Target number of partitions based on cluster size (optional, calculated as maxNodes * multiplier)",
                         nargs='?',
