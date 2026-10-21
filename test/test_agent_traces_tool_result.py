@@ -125,6 +125,13 @@ class MappedToolResultTests(unittest.TestCase):
                     row = dict(self.row, **failure)
                     self.assertEqual({}, result_attributes(convert_record(row, mapped_config(content_mode=mode))[0]))
 
+    def test_tool_success_false_without_is_error_is_an_error_span(self):
+        for success, code in ((False, 2), ("false", 2), (0, 2), ("no", 2), (True, 1), (None, 1), ("", 1), ("?", 1)):
+            with self.subTest(success=success):
+                row = dict(self.row, tool_success=success)
+                span = convert_record(row, mapped_config())[0].payload["resourceSpans"][0]["scopeSpans"][0]["spans"][0]
+                self.assertEqual(code, span["status"]["code"])
+
     def test_invalid_id_drops_both(self):
         for bad_id in ("   ", "x" * 513, True, 2**53, 1.5, None):
             with self.subTest(bad_id=bad_id):

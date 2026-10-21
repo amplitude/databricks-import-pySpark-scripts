@@ -668,6 +668,29 @@ def sanitize_tool_result(result: Any) -> Dict[str, str]:
     return clean
 
 
+def _is_false_flag(value: Any) -> bool:
+    """An explicit warehouse ``false``; missing, blank, and unrecognized values are not."""
+    if isinstance(value, bool):
+        return not value
+    if isinstance(value, (int, float)):
+        return math.isfinite(value) and value == 0
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"false", "0", "no", "n", "off", "f"}
+
+
+def _mapped_call_failed(event_type: Any, properties: Mapping[str, Any]) -> bool:
+    """Error status for a mapped row: ``[Agent] Is Error``, or a tool call whose
+    ``[Agent] Tool Success`` is false.
+
+    The receiver derives ``[Agent] Tool Success`` from the span status, so a
+    failed tool row without an ``Is Error`` column would otherwise read as a success.
+    """
+    if _is_error_flag(properties.get("[Agent] Is Error")):
+        return True
+    return event_type == _TOOL_CALL and _is_false_flag(properties.get(_TOOL_SUCCESS))
+
+
 def _mapped_tool_result(event: Mapping[str, Any]) -> Dict[str, str]:
     """Result ID/Type for a successful mapped ``[Agent] Tool Call``, or ``{}``.
 
@@ -788,7 +811,7 @@ def _mapped_otlp_span(
         name = event_type
 
     status: Dict[str, Any] = {
-        "code": 2 if _is_error_flag(properties.get("[Agent] Is Error")) else 1
+        "code": 2 if _mapped_call_failed(event_type, properties) else 1
     }
     if properties.get("[Agent] Error Message"):
         status["message"] = properties["[Agent] Error Message"]
