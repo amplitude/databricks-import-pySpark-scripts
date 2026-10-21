@@ -129,8 +129,10 @@ class MappedToolResultTests(unittest.TestCase):
         for success, code in ((False, 2), ("false", 2), (0, 2), ("no", 2), (True, 1), (None, 1), ("", 1), ("?", 1)):
             with self.subTest(success=success):
                 row = dict(self.row, tool_success=success)
-                span = convert_record(row, mapped_config())[0].payload["resourceSpans"][0]["scopeSpans"][0]["spans"][0]
+                record = convert_record(row, mapped_config())[0]
+                span = record.payload["resourceSpans"][0]["scopeSpans"][0]["spans"][0]
                 self.assertEqual(code, span["status"]["code"])
+                self.assertEqual(code == 1, "amplitude.tool.result_id" in result_attributes(record))
 
     def test_invalid_id_drops_both(self):
         for bad_id in ("   ", "x" * 513, True, 2**53, 1.5, None):

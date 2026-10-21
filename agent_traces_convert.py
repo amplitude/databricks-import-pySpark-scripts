@@ -700,14 +700,8 @@ def _mapped_tool_result(event: Mapping[str, Any]) -> Dict[str, str]:
     properties = event.get("event_properties")
     if event.get("event_type") != _TOOL_CALL or not isinstance(properties, Mapping):
         return {}
-    if _is_error_flag(properties.get("[Agent] Is Error")):
-        return {}
-    success = properties.get(_TOOL_SUCCESS)
-    if not (
-        success is None
-        or (isinstance(success, str) and not success.strip())
-        or _is_error_flag(success)
-    ):
+    # Same rule as the span status, so an OK tool span always keeps its join key.
+    if _mapped_call_failed(_TOOL_CALL, properties):
         return {}
     return sanitize_tool_result(
         {"id": properties.get(_RESULT_ID), "type": properties.get(_RESULT_TYPE)}
