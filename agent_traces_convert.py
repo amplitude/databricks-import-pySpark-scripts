@@ -729,7 +729,8 @@ def _agent_message_text(value: Any) -> Any:
 def _mapped_otlp_span(
     event: Mapping[str, Any],
     config: ConversionConfig,
-    tool_result: Optional[Mapping[str, str]] = None,
+    tool_result: Optional[Mapping[str, str]],
+    call_failed: bool,
 ) -> Mapping[str, Any]:
     properties = dict(event.get("event_properties") or {})
     event_type = event["event_type"]
@@ -804,9 +805,7 @@ def _mapped_otlp_span(
     else:
         name = event_type
 
-    status: Dict[str, Any] = {
-        "code": 2 if _mapped_call_failed(event_type, properties) else 1
-    }
+    status: Dict[str, Any] = {"code": 2 if call_failed else 1}
     if properties.get("[Agent] Error Message"):
         status["message"] = properties["[Agent] Error Message"]
     # HTTP V2 ``time`` is the operation end. Latency is measured backward.
@@ -890,7 +889,11 @@ def _convert_mapped(row: Mapping[str, Any], config: ConversionConfig) -> List[Co
     if config.named_format:
         if isinstance(properties, dict):
             properties.setdefault("[Agent] Source Format", config.named_format)
+    # Both read [Agent] Tool Success, which metadata-only drops.
     tool_result = _mapped_tool_result(event)
+    call_failed = _mapped_call_failed(
+        event.get("event_type"), event.get("event_properties") or {}
+    )
     if config.content_mode == ContentMode.METADATA_ONLY:
         _metadata_only_event(event)
     else:
@@ -901,7 +904,7 @@ def _convert_mapped(row: Mapping[str, Any], config: ConversionConfig) -> List[Co
             )
     _validate_http_event(event, config.strict_essentials)
     stable_key = stable_insert_id(event)
-    payload = _mapped_otlp_span(event, config, tool_result)
+    payload = _mapped_otlp_span(event, config, tool_result, call_failed)
     return [
         ConvertedRecord(
             protocol=Protocol.OTLP_JSON,
