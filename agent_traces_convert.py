@@ -147,7 +147,28 @@ _TOOL_RESULT_TYPE_ATTRIBUTE = "amplitude.tool.result_type"
 # Goals joins on the exact Result ID, and the SDKs send it unredacted in every
 # content mode, so these are kept like identity keys.
 _TOOL_RESULT_ATTRIBUTES = frozenset({_TOOL_RESULT_ID_ATTRIBUTE, _TOOL_RESULT_TYPE_ATTRIBUTE})
-_IDENTITY_KEYS = _TOOL_RESULT_ATTRIBUTES | frozenset(
+# OTel semantic conventions record each flag evaluation as a span event; the
+# receiver turns them into the [Agent] Experiment* properties.
+_FLAG_EVALUATION_EVENT = "feature_flag.evaluation"
+_FLAG_KEY_ATTRIBUTE = "feature_flag.key"
+_FLAG_VARIANT_ATTRIBUTE = "feature_flag.result.variant"
+_FLAG_PROVIDER_ATTRIBUTE = "feature_flag.provider.name"
+_EXPERIMENT_UNIT_ATTRIBUTE = "amplitude.experiment.unit"
+# Assignment metadata, which the SDKs send in every content mode.
+_EXPERIMENT_ATTRIBUTES = frozenset(
+    {
+        _FLAG_KEY_ATTRIBUTE,
+        _FLAG_VARIANT_ATTRIBUTE,
+        "feature_flag.variant",
+        _FLAG_PROVIDER_ATTRIBUTE,
+        _EXPERIMENT_UNIT_ATTRIBUTE,
+    }
+)
+# Plain event_properties names a mapping may fill from warehouse columns.
+_EXPERIMENTS_FIELD = "experiments"
+_EXPERIMENT_KEY_FIELD = "experiment_key"
+_EXPERIMENT_VARIANT_FIELD = "experiment_variant"
+_IDENTITY_KEYS = _TOOL_RESULT_ATTRIBUTES | _EXPERIMENT_ATTRIBUTES | frozenset(
     {
         "user_id",
         "userid",
@@ -668,6 +689,111 @@ def sanitize_tool_result(result: Any) -> Dict[str, str]:
     return clean
 
 
+# Copy of amplitude_ai.core.experiments; test/fixtures/experiment_cases.json,
+# copied from the SDK's golden file, pins both.
+_MAX_EXPERIMENTS = 10
+_EXPERIMENT_FIELD_MAX_LENGTH = 256
+_EXPERIMENT_UNITS = frozenset({"agent_session", "turn", "span"})
+_DEFAULT_EXPERIMENT_UNIT = "agent_session"
+
+
+def _experiment_field(value: Any) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    trimmed = value.strip(_RESULT_ID_TRIM)
+    return trimmed if 0 < len(trimmed) <= _EXPERIMENT_FIELD_MAX_LENGTH else None
+
+
+def _experiment_entry(raw: Any) -> Optional[Dict[str, str]]:
+    if not isinstance(raw, Mapping):
+        return None
+    key = _experiment_field(raw.get("key"))
+    variant = _experiment_field(raw.get("variant"))
+    if key is None or ":" in key or variant is None:
+        return None
+    unit = raw.get("unit")
+    entry = {
+        "key": key,
+        "variant": variant,
+        "unit": unit if isinstance(unit, str) and unit in _EXPERIMENT_UNITS else _DEFAULT_EXPERIMENT_UNIT,
+    }
+    provider = _experiment_field(raw.get("provider"))
+    if provider is not None:
+        entry["provider"] = provider
+    return entry
+
+
+def sanitize_experiments(*levels: Any) -> List[Dict[str, str]]:
+    """Valid ``{"key", "variant", "unit", "provider"?}`` entries, least specific level first.
+
+    A later entry replaces an earlier one with the same key and keeps its
+    position; entries past the tenth are dropped. Invalid entries and levels
+    that are not lists are dropped.
+    """
+    merged: Dict[str, Dict[str, str]] = {}
+    for level in levels:
+        if isinstance(level, (str, bytes, Mapping)) or not isinstance(level, Sequence):
+            continue
+        for raw in level:
+            entry = _experiment_entry(raw)
+            if entry is not None:
+                merged[entry["key"]] = entry
+    return list(merged.values())[:_MAX_EXPERIMENTS]
+
+
+def experiment_properties(experiments: Sequence[Mapping[str, str]]) -> Dict[str, Any]:
+    """The ``[Agent] Experiment*`` properties the receiver derives from these entries."""
+    if not experiments:
+        return {}
+    props: Dict[str, Any] = {
+        "[Agent] Experiments": ["{}:{}".format(entry["key"], entry["variant"]) for entry in experiments]
+    }
+    if len(experiments) == 1:
+        only = experiments[0]
+        props["[Agent] Experiment Key"] = only["key"]
+        props["[Agent] Experiment Variant"] = only["variant"]
+        props["[Agent] Experiment Unit"] = only["unit"]
+        if "provider" in only:
+            props["[Agent] Experiment Provider"] = only["provider"]
+    return props
+
+
+def _mapped_experiments(event: Mapping[str, Any]) -> List[Dict[str, str]]:
+    """Remove the experiment fields from a mapped event and return its experiments.
+
+    ``experiments`` (a list, or its JSON text) comes first; a per-row
+    ``experiment_key`` / ``experiment_variant`` pair overrides an entry with the
+    same key. Read before content handling so assignment survives every mode.
+    """
+    properties = event.get("event_properties")
+    if not isinstance(properties, dict):
+        return []
+    listed = properties.pop(_EXPERIMENTS_FIELD, None)
+    if isinstance(listed, (str, bytes)):
+        try:
+            listed = json.loads(listed)
+        except ValueError:
+            listed = None
+    key = properties.pop(_EXPERIMENT_KEY_FIELD, None)
+    variant = properties.pop(_EXPERIMENT_VARIANT_FIELD, None)
+    row_level = [{"key": key, "variant": variant}] if key is not None or variant is not None else None
+    return sanitize_experiments(listed, row_level)
+
+
+def _flag_evaluation_events(experiments: Sequence[Mapping[str, str]], time_nanos: int) -> List[Dict[str, Any]]:
+    events = []
+    for entry in experiments:
+        attributes = [
+            {"key": _FLAG_KEY_ATTRIBUTE, "value": {"stringValue": entry["key"]}},
+            {"key": _FLAG_VARIANT_ATTRIBUTE, "value": {"stringValue": entry["variant"]}},
+            {"key": _EXPERIMENT_UNIT_ATTRIBUTE, "value": {"stringValue": entry["unit"]}},
+        ]
+        if "provider" in entry:
+            attributes.append({"key": _FLAG_PROVIDER_ATTRIBUTE, "value": {"stringValue": entry["provider"]}})
+        events.append({"name": _FLAG_EVALUATION_EVENT, "timeUnixNano": str(time_nanos), "attributes": attributes})
+    return events
+
+
 def _is_false_flag(value: Any) -> bool:
     """An explicit warehouse ``false``; missing, blank, and unrecognized values are not."""
     if isinstance(value, bool):
@@ -731,6 +857,7 @@ def _mapped_otlp_span(
     config: ConversionConfig,
     tool_result: Optional[Mapping[str, str]],
     call_failed: bool,
+    experiments: Sequence[Mapping[str, str]] = (),
 ) -> Mapping[str, Any]:
     properties = dict(event.get("event_properties") or {})
     event_type = event["event_type"]
@@ -827,6 +954,8 @@ def _mapped_otlp_span(
         ),
         "status": status,
     }
+    if experiments:
+        span["events"] = _flag_evaluation_events(experiments, start_nanos)
     if properties.get("[Agent] Parent Span ID"):
         span["parentSpanId"] = _derived_hex(
             properties["[Agent] Parent Span ID"],
@@ -894,6 +1023,7 @@ def _convert_mapped(row: Mapping[str, Any], config: ConversionConfig) -> List[Co
     call_failed = _mapped_call_failed(
         event.get("event_type"), event.get("event_properties") or {}
     )
+    experiments = _mapped_experiments(event)
     if config.content_mode == ContentMode.METADATA_ONLY:
         _metadata_only_event(event)
     else:
@@ -904,7 +1034,7 @@ def _convert_mapped(row: Mapping[str, Any], config: ConversionConfig) -> List[Co
             )
     _validate_http_event(event, config.strict_essentials)
     stable_key = stable_insert_id(event)
-    payload = _mapped_otlp_span(event, config, tool_result, call_failed)
+    payload = _mapped_otlp_span(event, config, tool_result, call_failed, experiments)
     return [
         ConvertedRecord(
             protocol=Protocol.OTLP_JSON,
@@ -1620,7 +1750,11 @@ def convert_record(
         ``[Agent] Result ID`` / ``[Agent] Result Type`` as
         ``amplitude.tool.result_id`` / ``amplitude.tool.result_type`` in every
         content mode, unredacted; raw spans' copies of those attributes pass
-        through the same way for the receiver to validate.
+        through the same way for the receiver to validate;
+      * a mapped row's ``experiments`` / ``experiment_key`` /
+        ``experiment_variant`` event properties become one
+        ``feature_flag.evaluation`` span event per valid experiment, in every
+        content mode; raw spans' ``feature_flag.*`` attributes pass through.
     """
     row = normalize(record)
     if not isinstance(row, Mapping):
